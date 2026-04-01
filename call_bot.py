@@ -38,7 +38,7 @@ ELEVENLABS_API_KEY  = os.getenv("ELEVENLABS_API_KEY", "")
 # ElevenLabs voice IDs
 # Generic Indian male voice (free/default) — replace with cloned voice ID later
 HINDI_VOICE_ID      = "ibbx9zDYGvLgtYzRbqqG"   # Bunty – Smart Friendly Assistant (Hindi)
-ENGLISH_VOICE_ID    = "TxGEqnHWrfWFTfGW9XjX"   # Josh — US English male accent
+ENGLISH_VOICE_ID    = "nwj0s2LU9bDWRKND5yzA"   # Bunty English Indian — same character, English
 
 # Blocked numbers — these callers get normal TTS greeting, no sarcasm
 BLOCKED_NUMBERS = [
@@ -251,10 +251,11 @@ def respond():
     """Process speech input and respond with sarcastic reply."""
     caller_text  = request.form.get('SpeechResult', '').strip()
     call_sid     = request.form.get('CallSid', '')
-    detected_lang = request.args.get('detected_lang', 'hi-IN')
+    # Use Twilio's actual detected language from the POST body
+    twilio_lang  = request.form.get('Language', request.args.get('detected_lang', 'hi-IN'))
     
     # Map Twilio language code to our internal language
-    language = 'hindi' if detected_lang == 'hi-IN' else 'english'
+    language = 'english' if twilio_lang.lower().startswith('en') else 'hindi'
     
     print(f"  👂 Caller said: {caller_text} | Lang: {language}")
     
