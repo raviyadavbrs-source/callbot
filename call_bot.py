@@ -219,16 +219,16 @@ def incoming_call():
     with call_lock:
         call_history[call_sid] = []
     
-    # Gather caller's speech
+    # Gather caller's speech - shorter timeout for faster response
     gather = Gather(
         input='speech',
-        action=f'/call/respond?lang=auto',
+        action='/call/respond',
         method='POST',
-        speech_timeout='auto',
+        speech_timeout=2,
         language='hi-IN',
         enhanced=True
     )
-    gather.say("Haan bol.", voice='alice', language='hi-IN')
+    gather.say("Bol.", voice='alice', language='hi-IN')
     response.append(gather)
     
     # If no speech detected
@@ -270,37 +270,20 @@ def respond():
     reply = get_sarcastic_reply(call_sid, caller_text, language)
     print(f"  🤖 Bot reply: {reply}")
     
-    # Try ElevenLabs TTS
-    audio_file = text_to_speech(reply, language)
+    # Use Twilio TTS directly for speed — no ElevenLabs latency
+    tts_lang = 'hi-IN' if language == 'hindi' else 'en-IN'
+    response.say(reply, voice='alice', language=tts_lang)
     
-    if audio_file:
-        filename   = os.path.basename(audio_file)
-        # Use ngrok URL from env or fallback
-        base_url   = os.getenv('BASE_URL', 'https://your-railway-app.up.railway.app')
-        audio_url  = f"{base_url}/audio/{filename}"
-        response.play(audio_url)
-    else:
-        # Fallback to Twilio TTS
-        tts_lang = 'hi-IN' if language == 'hindi' else 'en-AU'
-        response.say(reply, voice='alice', language=tts_lang)
-    
-    # Continue listening
+    # Continue listening with shorter timeout
     gather = Gather(
         input='speech',
         action='/call/respond',
         method='POST',
-        speech_timeout='auto',
-        language='hi-IN' if language == 'hindi' else 'en-AU',
+        speech_timeout=2,
+        language=tts_lang,
         enhanced=True
     )
     response.append(gather)
-    
-    # Clean up audio file
-    if audio_file:
-        try:
-            threading.Timer(30, os.unlink, args=[audio_file]).start()
-        except:
-            pass
     
     return str(response)
 
