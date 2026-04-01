@@ -270,11 +270,24 @@ def respond():
     reply = get_sarcastic_reply(call_sid, caller_text, language)
     print(f"  🤖 Bot reply: {reply}")
     
-    # Use Twilio TTS directly for speed — no ElevenLabs latency
+    # ElevenLabs TTS — serve audio through Railway
+    audio_file = text_to_speech(reply, language)
+
+    if audio_file:
+        filename = os.path.basename(audio_file)
+        base_url = os.getenv('BASE_URL', 'https://callbot-production-a211.up.railway.app')
+        audio_url = f"{base_url}/audio/{filename}"
+        response.play(audio_url)
+        try:
+            threading.Timer(60, os.unlink, args=[audio_file]).start()
+        except:
+            pass
+    else:
+        tts_lang = 'hi-IN' if language == 'hindi' else 'en-AU'
+        response.say(reply, voice='alice', language=tts_lang)
+
+    # Continue listening
     tts_lang = 'hi-IN' if language == 'hindi' else 'en-IN'
-    response.say(reply, voice='alice', language=tts_lang)
-    
-    # Continue listening with shorter timeout
     gather = Gather(
         input='speech',
         action='/call/respond',
