@@ -38,7 +38,7 @@ ELEVENLABS_API_KEY  = os.getenv("ELEVENLABS_API_KEY", "")
 # ElevenLabs voice IDs
 # Generic Indian male voice (free/default) — replace with cloned voice ID later
 HINDI_VOICE_ID      = "ibbx9zDYGvLgtYzRbqqG"   # Bunty – Smart Friendly Assistant (Hindi)
-ENGLISH_VOICE_ID    = "EXAVITQu4vr4xnSDxMaL"   # Bella — Australian accent
+ENGLISH_VOICE_ID    = "TxGEqnHWrfWFTfGW9XjX"   # Josh — US English male accent
 
 # Blocked numbers — these callers get normal TTS greeting, no sarcasm
 BLOCKED_NUMBERS = [
@@ -219,16 +219,23 @@ def incoming_call():
     with call_lock:
         call_history[call_sid] = []
     
-    # Gather caller's speech - shorter timeout for faster response
+    # Detect language from caller number
+    is_indian = caller.startswith('+91') or caller.startswith('0091')
+    lang = 'hi-IN' if is_indian else 'en-US'
+    
+    # Gather caller speech
     gather = Gather(
         input='speech',
-        action='/call/respond',
+        action=f'/call/respond?detected_lang={lang}',
         method='POST',
         speech_timeout=2,
-        language='hi-IN',
+        language=lang,
         enhanced=True
     )
-    gather.say("Bol.", voice='alice', language='hi-IN')
+    if is_indian:
+        gather.say("Bol.", voice='alice', language='hi-IN')
+    else:
+        gather.say("Yeah?", voice='alice', language='en-US')
     response.append(gather)
     
     # If no speech detected
@@ -242,28 +249,33 @@ def incoming_call():
 @app.route('/call/respond', methods=['POST'])
 def respond():
     """Process speech input and respond with sarcastic reply."""
-    caller_text = request.form.get('SpeechResult', '').strip()
-    call_sid    = request.form.get('CallSid', '')
+    caller_text  = request.form.get('SpeechResult', '').strip()
+    call_sid     = request.form.get('CallSid', '')
+    detected_lang = request.args.get('detected_lang', 'hi-IN')
     
-    print(f"  👂 Caller said: {caller_text}")
+    # Map Twilio language code to our internal language
+    language = 'hindi' if detected_lang == 'hi-IN' else 'english'
+    
+    print(f"  👂 Caller said: {caller_text} | Lang: {language}")
     
     response = VoiceResponse()
     
     if not caller_text:
         gather = Gather(
             input='speech',
-            action='/call/respond',
+            action=f'/call/respond?detected_lang={detected_lang}',
             method='POST',
-            speech_timeout='auto',
-            language='hi-IN',
+            speech_timeout=2,
+            language=detected_lang,
             enhanced=True
         )
-        gather.say("Kya bola? Suna nahi.", voice='alice', language='hi-IN')
+        if language == 'hindi':
+            gather.say("Kya bola? Suna nahi.", voice='alice', language='hi-IN')
+        else:
+            gather.say("Didn't catch that mate.", voice='alice', language='en-AU')
         response.append(gather)
         return str(response)
     
-    # Detect language
-    language = detect_language(caller_text)
     print(f"  🌐 Language: {language}")
     
     # Get sarcastic reply from Claude
@@ -287,13 +299,12 @@ def respond():
         response.say(reply, voice='alice', language=tts_lang)
 
     # Continue listening
-    tts_lang = 'hi-IN' if language == 'hindi' else 'en-IN'
     gather = Gather(
         input='speech',
-        action='/call/respond',
+        action=f'/call/respond?detected_lang={detected_lang}',
         method='POST',
         speech_timeout=2,
-        language=tts_lang,
+        language=detected_lang,
         enhanced=True
     )
     response.append(gather)
