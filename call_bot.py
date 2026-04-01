@@ -342,4 +342,5 @@ if __name__ == '__main__':
     print(f"🌐 Set BASE_URL env var to your Railway/ngrok URL")
     print(f"🎭 ElevenLabs: {'✅ Configured' if ELEVENLABS_API_KEY else '❌ Not configured — using Twilio TTS'}")
     print("=" * 60)
-    app.run(host='0.0.0.0', port=5001, debug=False)
+    port = int(os.getenv('PORT', 5001))
+    app.run(host='0.0.0.0', port=port, debug=False)
