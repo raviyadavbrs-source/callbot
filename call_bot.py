@@ -265,10 +265,10 @@ def respond():
     if not caller_text:
         gather = Gather(
             input='speech',
-            action=f'/call/respond?detected_lang={detected_lang}',
+            action=f'/call/respond?detected_lang={twilio_lang}',
             method='POST',
             speech_timeout=2,
-            language=detected_lang,
+            language=twilio_lang,
             enhanced=True
         )
         if language == 'hindi':
@@ -303,10 +303,10 @@ def respond():
     # Continue listening
     gather = Gather(
         input='speech',
-        action=f'/call/respond?detected_lang={detected_lang}',
+        action=f'/call/respond?detected_lang={twilio_lang}',
         method='POST',
         speech_timeout=2,
-        language=detected_lang,
+        language=twilio_lang,
         enhanced=True
     )
     response.append(gather)
