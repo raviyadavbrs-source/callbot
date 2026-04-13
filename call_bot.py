@@ -312,17 +312,20 @@ def serve_audio(filename):
 # ============================================================
 @app.route('/pooja', methods=['GET', 'POST'])
 def pooja_ui():
+    # Auth: POST with password form OR GET with ?key=PASSWORD
+    authed = False
     error = ''
+
     if request.method == 'POST':
         pwd = request.form.get('password', '')
-        if pwd != UI_PASSWORD:
-            error = 'Wrong password.'
+        if pwd == UI_PASSWORD:
+            authed = True
         else:
-            session['authed'] = True
-            return redirect('/pooja')
-    if not session.get('authed'):
-        pass  # show login
-    else:
+            error = 'Wrong password.'
+    elif request.args.get('key', '') == UI_PASSWORD:
+        authed = True
+
+    if authed:
         contacts_json = json.dumps(CONTACTS)
         html = """<!DOCTYPE html>
 <html lang="en">
