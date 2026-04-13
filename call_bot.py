@@ -312,21 +312,8 @@ def serve_audio(filename):
 # ============================================================
 @app.route('/pooja', methods=['GET', 'POST'])
 def pooja_ui():
-    # Auth: POST with password form OR GET with ?key=PASSWORD
-    authed = False
-    error = ''
-
-    if request.method == 'POST':
-        pwd = request.form.get('password', '')
-        if pwd == UI_PASSWORD:
-            authed = True
-        else:
-            error = 'Wrong password.'
-    elif request.args.get('key', '') == UI_PASSWORD:
-        authed = True
-
-    if authed:
-        contacts_json = json.dumps(CONTACTS)
+    contacts_json = json.dumps(CONTACTS)
+    if True:  # no auth - URL is private
         html = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -334,309 +321,126 @@ def pooja_ui():
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>Pooja</title>
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    background: #0a0a0f;
-    color: #e8e8f0;
-    min-height: 100vh;
-    padding: 20px 16px 40px;
-  }
-  .header { text-align: center; padding: 24px 0 28px; }
-  .avatar {
-    width: 64px; height: 64px;
-    background: linear-gradient(135deg, #7c3aed, #db2777);
-    border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 28px;
-    margin: 0 auto 12px;
-    box-shadow: 0 0 24px rgba(124,58,237,0.4);
-  }
-  .header h1 { font-size: 22px; font-weight: 700; }
-  .header p { font-size: 13px; color: #888; margin-top: 4px; }
-  .card {
-    background: #13131a;
-    border: 1px solid #1e1e2e;
-    border-radius: 16px;
-    padding: 20px;
-    margin-bottom: 16px;
-  }
-  .card-title {
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 1.5px;
-    color: #666;
-    margin-bottom: 14px;
-  }
-  .contacts-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 10px;
-  }
-  .contact-btn {
-    background: #1a1a26;
-    border: 2px solid #1e1e2e;
-    border-radius: 12px;
-    padding: 12px 10px;
-    text-align: center;
-    cursor: pointer;
-    transition: all 0.15s;
-    color: #c8c8e0;
-    font-size: 13px;
-    font-weight: 500;
-  }
-  .contact-btn.selected {
-    border-color: #7c3aed;
-    background: #1e1030;
-    color: #a78bfa;
-  }
-  .contact-btn .initials {
-    width: 32px; height: 32px;
-    background: linear-gradient(135deg, #2d1f6e, #6d28d9);
-    border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 12px; font-weight: 700; color: #c4b5fd;
-    margin: 0 auto 6px;
-  }
-  .toggle-row { display: flex; gap: 10px; }
-  .toggle-btn {
-    flex: 1;
-    padding: 12px;
-    border-radius: 12px;
-    border: 2px solid #1e1e2e;
-    background: #1a1a26;
-    color: #888;
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    text-align: center;
-    transition: all 0.15s;
-  }
-  .toggle-btn.selected {
-    border-color: #db2777;
-    background: #1f0f1a;
-    color: #f472b6;
-  }
-  .field { margin-bottom: 14px; }
-  .field label {
-    display: block;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    color: #666;
-    margin-bottom: 6px;
-  }
-  .field input {
-    width: 100%;
-    background: #1a1a26;
-    border: 1px solid #1e1e2e;
-    border-radius: 10px;
-    padding: 12px 14px;
-    color: #e8e8f0;
-    font-size: 15px;
-    outline: none;
-    transition: border-color 0.15s;
-  }
-  .field input:focus { border-color: #7c3aed; }
-  .field input::placeholder { color: #444; }
-  .call-btn {
-    width: 100%;
-    padding: 16px;
-    border-radius: 14px;
-    border: none;
-    background: linear-gradient(135deg, #7c3aed, #db2777);
-    color: white;
-    font-size: 16px;
-    font-weight: 700;
-    cursor: pointer;
-    transition: opacity 0.15s, transform 0.15s;
-    margin-top: 4px;
-    box-shadow: 0 4px 20px rgba(124,58,237,0.35);
-  }
-  .call-btn:active { transform: scale(0.97); opacity: 0.9; }
-  .call-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-  .status {
-    text-align: center;
-    padding: 14px;
-    border-radius: 12px;
-    font-size: 14px;
-    font-weight: 500;
-    margin-top: 14px;
-    display: none;
-  }
-  .status.success { background: #0d2010; color: #4ade80; border: 1px solid #166534; }
-  .status.error   { background: #200d0d; color: #f87171; border: 1px solid #7f1d1d; }
-  #plan-fields { display: none; }
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0a0a0f;color:#e8e8f0;min-height:100vh;padding:20px 16px 40px;}
+.header{text-align:center;padding:24px 0 28px;}
+.avatar{width:64px;height:64px;background:linear-gradient(135deg,#7c3aed,#db2777);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:28px;margin:0 auto 12px;box-shadow:0 0 24px rgba(124,58,237,0.4);}
+h1{font-size:22px;font-weight:700;}
+.sub{font-size:13px;color:#888;margin-top:4px;}
+.card{background:#13131a;border:1px solid #1e1e2e;border-radius:16px;padding:20px;margin-bottom:16px;}
+.label{font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:#666;margin-bottom:10px;}
+input{width:100%;background:#1a1a26;border:1px solid #1e1e2e;border-radius:10px;padding:13px 14px;color:#e8e8f0;font-size:16px;outline:none;}
+input:focus{border-color:#7c3aed;}
+input::placeholder{color:#444;}
+.toggle-row{display:flex;gap:10px;}
+.toggle-btn{flex:1;padding:12px;border-radius:12px;border:2px solid #1e1e2e;background:#1a1a26;color:#888;font-size:13px;font-weight:600;cursor:pointer;text-align:center;}
+.toggle-btn.selected{border-color:#db2777;background:#1f0f1a;color:#f472b6;}
+.call-btn{width:100%;padding:16px;border-radius:14px;border:none;background:linear-gradient(135deg,#7c3aed,#db2777);color:white;font-size:16px;font-weight:700;cursor:pointer;margin-top:4px;box-shadow:0 4px 20px rgba(124,58,237,0.35);}
+.call-btn:disabled{opacity:0.4;}
+.status{text-align:center;padding:14px;border-radius:12px;font-size:14px;font-weight:500;margin-top:14px;display:none;}
+.status.success{background:#0d2010;color:#4ade80;border:1px solid #166534;}
+.status.error{background:#200d0d;color:#f87171;border:1px solid #7f1d1d;}
+#plan-fields{display:none;}
+.logs-title{font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:#666;margin-bottom:14px;margin-top:24px;}
+.log-card{background:#13131a;border:1px solid #1e1e2e;border-radius:14px;padding:16px;margin-bottom:12px;}
+.log-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;}
+.log-name{font-size:15px;font-weight:700;color:#e8e8f0;}
+.log-meta{font-size:11px;color:#555;margin-top:3px;}
+.log-status{font-size:10px;font-weight:700;padding:3px 8px;border-radius:20px;text-transform:uppercase;}
+.log-status.ok{background:#0d2010;color:#4ade80;}
+.log-status.na{background:#1f0f0f;color:#f87171;}
+.tr-toggle{background:#1a1a26;border:1px solid #1e1e2e;border-radius:8px;color:#888;font-size:12px;padding:6px 12px;cursor:pointer;margin-top:8px;}
+.transcript{margin-top:10px;background:#0d0d14;border-radius:10px;padding:12px;max-height:200px;overflow-y:auto;}
+.tr-line{font-size:12px;color:#c8c8e0;margin-bottom:6px;line-height:1.5;}
+.tr-role{color:#a78bfa;font-weight:700;}
 </style>
 </head>
 <body>
 <div class="header">
   <div class="avatar">&#128188;</div>
   <h1>Pooja</h1>
-  <p>Mr. Ravi's Personal Assistant</p>
+  <p class="sub">Mr. Ravi's Personal Assistant</p>
 </div>
 <div class="card">
-  <div class="card-title">Select Contact</div>
-  <div class="contacts-grid" id="contacts-grid"></div>
+  <div class="label">Phone Number</div>
+  <input type="tel" id="phone-input" placeholder="+91 98290 55878">
 </div>
 <div class="card">
-  <div class="card-title">Call Type</div>
+  <div class="label">Call Type</div>
   <div class="toggle-row">
     <div class="toggle-btn selected" id="btn-checkin" onclick="selectType('checkin')">&#128075; Check-in</div>
     <div class="toggle-btn" id="btn-plan" onclick="selectType('plan')">&#128197; Plan Meet</div>
   </div>
 </div>
 <div class="card" id="plan-fields">
-  <div class="card-title">Meetup Details</div>
-  <div class="field">
-    <label>Time</label>
-    <input type="text" id="time-input" placeholder="e.g. tomorrow 6pm">
-  </div>
-  <div class="field">
-    <label>Place</label>
-    <input type="text" id="place-input" placeholder="e.g. Cafe Coffee Day, C-scheme">
-  </div>
+  <div class="label">Meetup Details</div>
+  <input type="text" id="time-input" placeholder="Time e.g. tomorrow 6pm" style="margin-bottom:10px;">
+  <input type="text" id="place-input" placeholder="Place e.g. Cafe Coffee Day">
 </div>
 <button class="call-btn" id="call-btn" onclick="makeCall()">&#128222; Call Now</button>
 <div class="status" id="status"></div>
+<div class="logs-title">&#128222; Call History</div>
+<div id="logs-container"><div style="color:#555;font-size:13px;text-align:center;padding:16px;">No calls yet.</div></div>
 <script>
-var CONTACTS = CONTACTS_PLACEHOLDER;
-var selectedNumber = '';
-var selectedName = '';
 var callType = 'checkin';
-var grid = document.getElementById('contacts-grid');
-CONTACTS.forEach(function(c) {
-  var initials = c.name.split(' ').map(function(w){return w[0];}).join('').toUpperCase().slice(0,2);
-  var btn = document.createElement('div');
-  btn.className = 'contact-btn';
-  btn.innerHTML = '<div class="initials">'+initials+'</div>'+c.name;
-  btn.onclick = (function(number, name, el) {
-    return function() { selectContact(number, name, el); };
-  })(c.number, c.name, btn);
-  grid.appendChild(btn);
-});
-function selectContact(number, name, el) {
-  document.querySelectorAll('.contact-btn').forEach(function(b){b.classList.remove('selected');});
-  el.classList.add('selected');
-  selectedNumber = number;
-  selectedName = name;
-}
-function selectType(type) {
-  callType = type;
-  document.getElementById('btn-checkin').classList.toggle('selected', type==='checkin');
-  document.getElementById('btn-plan').classList.toggle('selected', type==='plan');
-  document.getElementById('plan-fields').style.display = type==='plan' ? 'block' : 'none';
+function selectType(t) {
+  callType = t;
+  document.getElementById('btn-checkin').classList.toggle('selected', t==='checkin');
+  document.getElementById('btn-plan').classList.toggle('selected', t==='plan');
+  document.getElementById('plan-fields').style.display = t==='plan' ? 'block' : 'none';
 }
 async function makeCall() {
-  if (!selectedNumber) { showStatus('Please select a contact.', 'error'); return; }
+  var phone = document.getElementById('phone-input').value.trim();
+  if (!phone) { showStatus('Enter a phone number.', 'error'); return; }
+  if (!phone.startsWith('+')) phone = '+91' + phone.replace(/^0/, '');
   if (callType === 'plan') {
     var t = document.getElementById('time-input').value.trim();
     var p = document.getElementById('place-input').value.trim();
-    if (!t || !p) { showStatus('Please enter time and place.', 'error'); return; }
+    if (!t || !p) { showStatus('Enter time and place.', 'error'); return; }
   }
   var btn = document.getElementById('call-btn');
-  btn.disabled = true;
-  btn.textContent = 'Calling...';
-  var body = { to: selectedNumber, call_type: callType };
+  btn.disabled = true; btn.textContent = 'Calling...';
+  var body = { to: phone, call_type: callType };
   if (callType === 'plan') {
     body.time  = document.getElementById('time-input').value.trim();
     body.place = document.getElementById('place-input').value.trim();
   }
   try {
-    var res  = await fetch('/call/outbound', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body)
-    });
+    var res = await fetch('/call/outbound', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
     var data = await res.json();
-    if (res.ok) {
-      showStatus('Pooja is calling ' + selectedName + '...', 'success');
-    } else {
-      showStatus((data.error || 'Call failed.'), 'error');
-    }
-  } catch(e) {
-    showStatus('Network error. Try again.', 'error');
-  }
-  btn.disabled = false;
-  btn.textContent = 'Call Now';
+    if (res.ok) { showStatus('Pooja is calling '+phone+'...', 'success'); }
+    else { showStatus(data.error || 'Call failed.', 'error'); }
+  } catch(e) { showStatus('Network error.', 'error'); }
+  btn.disabled = false; btn.textContent = '\u260e Call Now';
 }
 function showStatus(msg, type) {
   var el = document.getElementById('status');
-  el.textContent = msg;
-  el.className = 'status ' + type;
-  el.style.display = 'block';
+  el.textContent = msg; el.className = 'status '+type; el.style.display = 'block';
   setTimeout(function(){ el.style.display='none'; }, 5000);
 }
-
-// ── CALL LOGS ──────────────────────────────────────────────
 function loadLogs() {
   fetch('/pooja/logs').then(function(r){ return r.json(); }).then(function(logs) {
-    var container = document.getElementById('logs-container');
-    if (!logs || logs.length === 0) {
-      container.innerHTML = '<div style="color:#555;font-size:13px;text-align:center;padding:16px;">No calls yet.</div>';
-      return;
-    }
-    container.innerHTML = logs.map(function(log) {
-      var badge = log.call_type === 'plan' ? '&#128197; Plan Meet' : '&#128075; Check-in';
-      var details = log.call_type === 'plan' ? '<div class="log-detail">&#128205; ' + log.place + ' &nbsp;&#128336; ' + log.time_proposed + '</div>' : '';
-      var transcript = log.transcript && log.transcript.length
-        ? '<div class="transcript" id="tr-'+log.call_sid+'" style="display:none">' +
-          log.transcript.map(function(l){ return '<div class="tr-line"><span class="tr-role">' + l.split(': ')[0] + ':</span> ' + l.split(': ').slice(1).join(': ') + '</div>'; }).join('') +
-          '</div>'
-        : '';
-      var audio = log.recording_url
-        ? '<audio controls style="width:100%;margin-top:10px;border-radius:8px;" src="' + log.recording_url + '"></audio>'
-        : '<div style="font-size:11px;color:#555;margin-top:6px;">Recording processing...</div>';
-      return '<div class="log-card">' +
-        '<div class="log-top">' +
-          '<div>' +
-            '<div class="log-name">' + log.friend_name + '</div>' +
-            '<div class="log-meta">' + badge + ' &nbsp;&#8226;&nbsp; ' + log.timestamp + ' &nbsp;&#8226;&nbsp; ' + log.duration + 's</div>' +
-          '</div>' +
-          '<div class="log-status ' + (log.status === 'completed' ? 'ok' : 'na') + '">' + log.status + '</div>' +
-        '</div>' +
-        details +
-        '<button class="tr-toggle" onclick="toggleTr(\'' + log.call_sid + '\')">&#128172; Transcript</button>' +
-        transcript +
-        audio +
-      '</div>';
+    var c = document.getElementById('logs-container');
+    if (!logs || logs.length === 0) { c.innerHTML = '<div style="color:#555;font-size:13px;text-align:center;padding:16px;">No calls yet.</div>'; return; }
+    c.innerHTML = logs.map(function(log) {
+      var badge = log.call_type==='plan' ? '&#128197; Plan' : '&#128075; Check-in';
+      var details = log.call_type==='plan' ? '<div style="font-size:12px;color:#888;margin:4px 0;">'+log.place+' &bull; '+log.time_proposed+'</div>' : '';
+      var tr = log.transcript && log.transcript.length ? '<div class="transcript" id="tr-'+log.call_sid+'" style="display:none">'+log.transcript.map(function(l){ var parts=l.split(': '); return '<div class="tr-line"><span class="tr-role">'+parts[0]+':</span> '+parts.slice(1).join(': ')+'</div>'; }).join('')+'</div>' : '';
+      var audio = log.recording_url ? '<audio controls style="width:100%;margin-top:10px;border-radius:8px;" src="'+log.recording_url+'"></audio>' : '<div style="font-size:11px;color:#555;margin-top:6px;">Recording processing...</div>';
+      return '<div class="log-card"><div class="log-top"><div><div class="log-name">'+log.friend_name+'</div><div class="log-meta">'+badge+' &bull; '+log.timestamp+' &bull; '+log.duration+'s</div></div><div class="log-status '+( log.status==='completed' ? 'ok' : 'na')+'">'+log.status+'</div></div>'+details+'<button class="tr-toggle" onclick="toggleTr(\\''+log.call_sid+'\\')">&#128172; Transcript</button>'+tr+audio+'</div>';
     }).join('');
-  }).catch(function(){ });
+  }).catch(function(){});
 }
-function toggleTr(sid) {
-  var el = document.getElementById('tr-'+sid);
-  if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
-}
+function toggleTr(sid) { var el=document.getElementById('tr-'+sid); if(el) el.style.display=el.style.display==='none'?'block':'none'; }
 loadLogs();
 setInterval(loadLogs, 15000);
 </script>
-
-<style>
-.logs-section { margin-top: 24px; }
-.logs-title { font-size:11px; text-transform:uppercase; letter-spacing:1.5px; color:#666; margin-bottom:14px; }
-.log-card { background:#13131a; border:1px solid #1e1e2e; border-radius:14px; padding:16px; margin-bottom:12px; }
-.log-top { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:6px; }
-.log-name { font-size:15px; font-weight:700; color:#e8e8f0; }
-.log-meta { font-size:11px; color:#555; margin-top:3px; }
-.log-detail { font-size:12px; color:#888; margin:6px 0 8px; }
-.log-status { font-size:10px; font-weight:700; padding:3px 8px; border-radius:20px; text-transform:uppercase; }
-.log-status.ok { background:#0d2010; color:#4ade80; }
-.log-status.na { background:#1f0f0f; color:#f87171; }
-.tr-toggle { background:#1a1a26; border:1px solid #1e1e2e; border-radius:8px; color:#888; font-size:12px; padding:6px 12px; cursor:pointer; margin-top:8px; }
-.transcript { margin-top:10px; background:#0d0d14; border-radius:10px; padding:12px; max-height:200px; overflow-y:auto; }
-.tr-line { font-size:12px; color:#c8c8e0; margin-bottom:6px; line-height:1.5; }
-.tr-role { color:#a78bfa; font-weight:700; }
-</style>
-
-<div class="logs-section">
-  <div class="logs-title">&#128222; Call History</div>
-  <div id="logs-container"><div style="color:#555;font-size:13px;text-align:center;padding:16px;">Loading...</div></div>
-</div>
-
 </body>
 </html>"""
         html = html.replace('CONTACTS_PLACEHOLDER', contacts_json)
         return Response(html, mimetype='text/html')
+
+    return Response('Not found', status=404)
 
     login_html = """<!DOCTYPE html>
 <html lang="en">
