@@ -491,11 +491,12 @@ setInterval(loadLogs, 15000);
 # ============================================================
 @app.route('/call/outbound', methods=['POST'])
 def outbound_call():
-    data      = request.get_json(force=True) or {}
-    to        = data.get('to', '').strip()
-    call_type = data.get('call_type', 'checkin')
-    time      = data.get('time', '').strip()
-    place     = data.get('place', '').strip()
+    data        = request.get_json(force=True) or {}
+    to          = data.get('to', '').strip()
+    call_type   = data.get('call_type', 'checkin')
+    time        = data.get('time', '').strip()
+    place       = data.get('place', '').strip()
+    friend_name = data.get('friend_name', '').strip() or to
 
     if not to:
         return {"error": "to is required"}, 400
