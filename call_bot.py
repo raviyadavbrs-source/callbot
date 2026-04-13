@@ -367,7 +367,8 @@ async function makeCall() {
   var btn = document.getElementById('call-btn');
   btn.disabled = true; btn.textContent = 'Calling...';
   var fname = document.getElementById('name-input').value.trim();
-  var body = { to: phone, call_type: callType, friend_name: fname || phone };
+  if (!fname) { showStatus('Please enter a name.', 'error'); btn.disabled=false; btn.textContent='\u260e Call Now'; return; }
+  var body = { to: phone, call_type: callType, friend_name: fname };
   if (callType === 'plan') {
     body.time  = document.getElementById('time-input').value.trim();
     body.place = document.getElementById('place-input').value.trim();
@@ -501,8 +502,6 @@ def outbound_call():
     if call_type == 'plan' and (not time or not place):
         return {"error": "time and place required for plan call"}, 400
 
-    # Lookup friend name from contacts
-    friend_name = next((c['name'] for c in CONTACTS if c['number'] == to), to)
     print(f"\n📤 Outbound [{call_type}] → {friend_name} ({to}) | Time: {time} | Place: {place}")
 
     try:
@@ -541,9 +540,11 @@ def outbound_start():
         call_meta[call_sid]    = {'type': call_type, 'time': time, 'place': place, 'friend_name': friend_name, 'language': 'english'}
 
     if call_type == 'plan':
-        opening = f"Hello, is this {friend_name}? This is Pooja calling on behalf of Mr. Ravi. I was wondering if you are available to meet him at {place} around {time}?"
+        name_part = f"Hello, is this {friend_name}? " if friend_name and not friend_name.startswith('+') and not friend_name.isdigit() else "Hello! "
+        opening = name_part + f"This is Pooja calling on behalf of Mr. Ravi. I was wondering if you are available to meet him at {place} around {time}?"
     else:
-        opening = f"Hello, is this {friend_name}? This is Pooja calling on behalf of Mr. Ravi. He wanted me to check in on you and see how you have been doing."
+        name_part = f"Hello, is this {friend_name}? " if friend_name and not friend_name.startswith('+') and not friend_name.isdigit() else "Hello! "
+        opening = name_part + "This is Pooja calling on behalf of Mr. Ravi. He wanted me to check in on you and see how you have been doing."
 
     response = VoiceResponse()
     play_audio_or_say(response, opening, voice_id=POOJA_VOICE_ID, fallback_lang='en-US')
@@ -556,7 +557,7 @@ def outbound_start():
         action='/call/outbound/respond',
         method='POST',
         speech_timeout=3,
-        language='en-US',
+        language='hi-IN',
         speech_model='phone_call'
     )
     response.append(gather)
