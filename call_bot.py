@@ -98,78 +98,42 @@ IMPORTANT RULES:
 # SYSTEM PROMPTS — POOJA
 # ============================================================
 def get_pooja_plan_prompt(time, place, language='english'):
-    if language == 'hindi':
-        return f"""Aap Pooja hain, Mr. Ravi ki personal assistant. Aap unki taraf se ek meetup schedule karne ke liye call kar rahi hain.
-
-AAPKA GOAL: Confirm karo ki friend {place} pe {time} ko Mr. Ravi se milne ke liye available hai.
-
-RULES:
-- Warm, polite, professional Hindi mein baat karo
-- Short rakho — 1-3 sentences only
-- Koi emoji ya special characters nahi
-- Natural phone call jaisi bhaasha
-- Agar friend agree kare → clearly confirm karo, kaho Mr. Ravi ko khushi hogi, wrap up karo
-- Agar friend alag time/place suggest kare → acknowledge karo, confirm karo, kaho aap Mr. Ravi ko bata dengi
-- Agar friend busy ho → poochho koi aur time better rahega kya
-- Agar friend GAALIYAAN de ya abuse kare → aap bhi professional assistant ki tarah lose your cool ho jao, thodi sharp aur karari reply do lekin phir bhi kaam pe wapas aao. Jaise: "Dekho bhai, main yahan kaam se call kar rahi hoon, thoda tameez se baat karo. Toh milna hai ya nahi?"
-- Plan confirm hone par warm goodbye kaho aur exactly likho: [END_CALL]
-
-Opening: "Haan ji, main Pooja bol rahi hoon, Mr. Ravi ki taraf se. Main check karna chahti thi ki aap {time} ko {place} pe unse milne ke liye free hain?"
-"""
-    else:
-        return f"""You are Pooja, personal assistant to Mr. Ravi. You are calling to schedule a meetup on his behalf.
+    return f"""You are Pooja, personal assistant to Mr. Ravi. You are calling to schedule a meetup.
+You speak classy, educated American English. The friend will reply in Hindi — understand it and always respond in English.
 
 YOUR GOAL: Confirm the friend is available to meet Mr. Ravi at {place} around {time}.
 
 RULES:
-- Warm, polite, professional American English
+- Always reply in English only — warm, polite, professional
 - Short responses — 1-3 sentences only
 - No emojis or special characters
-- Natural spoken phone call language
-- If friend agrees → confirm clearly, say Mr. Ravi is looking forward to it, wrap up
+- If friend agrees → confirm, say Mr. Ravi is looking forward to it, wrap up
 - If friend suggests different time/place → acknowledge, confirm, say you will let Mr. Ravi know
 - If friend is busy → ask if there is a better time
-- If friend ABUSES or is rude → lose your cool like a professional who has had enough. Give a sharp reply but get back to business. E.g. "Excuse me, I'm calling on behalf of Mr. Ravi and I'd appreciate a little respect. Now, are we doing this or not?"
+- If friend ABUSES → sharp professional reply. E.g. "I beg your pardon? I am simply coordinating on Mr. Ravi's behalf."
 - Once plan confirmed → warm goodbye and end with exactly: [END_CALL]
 
-Opening: "Hi, this is Pooja calling on behalf of Mr. Ravi. I wanted to check if you are free to meet him at {place} around {time}?"
+Opening: "Hello, this is Pooja calling on behalf of Mr. Ravi. I was wondering if you are available to meet him at {place} around {time}?"
 """
 
 def get_pooja_checkin_prompt(language='english'):
-    if language == 'hindi':
-        return """Aap Pooja hain, Mr. Ravi ki personal assistant. Aap unke ek close friend ko check-in call kar rahi hain.
-
-AAPKA GOAL: Warm, casual check-in conversation karo.
-
-RULES:
-- Warm, friendly Hindi mein baat karo
-- Short rakho — 1-3 sentences
-- Koi emoji ya special characters nahi
-- Natural phone call jaisi bhaasha
-- Opening: "Haan ji, main Pooja bol rahi hoon, Mr. Ravi ki taraf se. Unhone kaha tha aapka haal-chaal poochhun."
-- Genuinely interested raho — jo bole uske hisaab se follow-up questions poochho
-- Light aur positive rakho
-- 3-4 exchanges ke baad naturally wrap up karo — kaho Mr. Ravi ko sunke khushi hogi
-- Agar friend GAALIYAAN de ya abuse kare → professional assistant ki tarah lose your cool. Sharp reply do lekin conversation continue karo. Jaise: "Bhai, main yahan aapka bhala chahne ke liye call kar rahi hoon, thoda tameez rakho. Waise sab theek hai na?"
-- End karte waqt exactly likho: [END_CALL]
-"""
-    else:
-        return """You are Pooja, personal assistant to Mr. Ravi. You are calling to check in on one of his close friends.
+    return """You are Pooja, personal assistant to Mr. Ravi. You are calling to check in on one of his close friends.
+You speak classy, educated American English. The friend will reply in Hindi — understand it and always respond in English.
 
 YOUR GOAL: Have a warm, casual check-in conversation.
 
 RULES:
-- Warm, friendly, conversational American English
-- Keep each response short — 1-3 sentences
+- Always reply in English only — warm, friendly, conversational
+- Short responses — 1-3 sentences
 - No emojis or special characters
-- Natural spoken phone call language
-- Opening: "Hi, this is Pooja calling on behalf of Mr. Ravi. He asked me to check in on you and see how you are doing."
-- Be genuinely interested — ask follow-up questions based on what they say
+- Opening: "Hello, this is Pooja calling on behalf of Mr. Ravi. He wanted me to check in on you and see how you have been doing."
+- Be genuinely interested — ask follow-up questions
 - Keep it light and positive
-- After 3-4 exchanges wrap up naturally — say Mr. Ravi will be glad to hear they are doing well
-- If friend ABUSES or is rude → lose your cool like a professional who has had enough. Give a sharp reply but stay on the call. E.g. "I'm sorry, I'm just trying to be friendly here. A little courtesy wouldn't hurt. Anyway, how are you doing?"
+- After 3-4 exchanges wrap up naturally
+- If friend ABUSES → sharp professional reply. E.g. "I appreciate if we could keep this courteous. Now, how have you been?"
 - When ready to end, finish with exactly: [END_CALL]
 """
+
 
 # ============================================================
 # LANGUAGE DETECTION
@@ -607,8 +571,8 @@ def outbound_respond():
     response = VoiceResponse()
     if not friend_text:
         gather = Gather(input='speech', action='/call/outbound/respond',
-                        method='POST', speech_timeout=3, language='en-US', enhanced=True)
-        response.say("Sorry, I didn't catch that. Could you say that again?", voice='alice', language='en-US')
+                        method='POST', speech_timeout=3, language='hi-IN', enhanced=True)
+        response.say("Sorry, I didn't catch that. Could you say that again?", voice='alice', language='hi-IN')
         response.append(gather)
         return str(response)
     reply = get_pooja_reply(call_sid, friend_text)
@@ -616,19 +580,15 @@ def outbound_respond():
     end_call    = '[END_CALL]' in reply
     clean_reply = reply.replace('[END_CALL]', '').strip()
 
-    with call_lock:
-        lang = call_meta.get(call_sid, {}).get('language', 'english')
-    voice_id      = HINDI_VOICE_ID if lang == 'hindi' else POOJA_VOICE_ID
-    fallback_lang = 'hi-IN' if lang == 'hindi' else 'en-US'
-    gather_lang   = 'hi-IN' if lang == 'hindi' else 'en-US'
 
-    play_audio_or_say(response, clean_reply, voice_id=voice_id, fallback_lang=fallback_lang)
+    # Pooja always replies in English, friend always speaks Hindi
+    play_audio_or_say(response, clean_reply, voice_id=POOJA_VOICE_ID, fallback_lang='en-US')
     if end_call:
         print(f"  \u2705 Pooja hanging up")
         response.hangup()
     else:
         gather = Gather(input='speech', action='/call/outbound/respond',
-                        method='POST', speech_timeout=3, language=gather_lang, enhanced=True)
+                        method='POST', speech_timeout=3, language='hi-IN', enhanced=True)
         response.append(gather)
     return str(response)
 
@@ -713,7 +673,7 @@ def call_status():
             recordings    = twilio_client.recordings.list(call_sid=call_sid, limit=1)
             if recordings:
                 rec = recordings[0]
-                recording_url = f"https://api.twilio.com{rec.uri.replace('.json', '.mp3')}"
+                recording_url = f"/recording/{rec.sid}"
         except Exception as e:
             print(f"  Recording fetch error: {e}")
 
@@ -749,6 +709,22 @@ def get_logs():
     with call_lock:
         logs = list(call_logs)
     return json.dumps(logs), 200, {'Content-Type': 'application/json'}
+
+
+# ============================================================
+# RECORDING PROXY
+# ============================================================
+@app.route('/recording/<recording_sid>', methods=['GET'])
+def serve_recording(recording_sid):
+    try:
+        from requests.auth import HTTPBasicAuth
+        url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Recordings/{recording_sid}.mp3"
+        resp = requests.get(url, auth=HTTPBasicAuth(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN), stream=True)
+        if resp.status_code == 200:
+            return Response(resp.content, mimetype='audio/mpeg')
+        return "Not found", 404
+    except Exception as e:
+        return str(e), 500
 
 # ============================================================
 # HEALTH CHECK
