@@ -19,6 +19,7 @@ import os
 import json
 import threading
 import urllib.parse
+import datetime
 
 app = Flask(__name__)
 
@@ -903,7 +904,6 @@ def call_status():
         except Exception as e:
             print(f"  Recording fetch error: {e}")
 
-        import datetime
         log_entry = {
             'call_sid':      call_sid,
             'friend_name':   meta.get('friend_name', 'Unknown'),
