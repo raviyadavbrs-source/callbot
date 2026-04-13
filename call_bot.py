@@ -9,7 +9,7 @@
 ╚══════════════════════════════════════════════════════════════════════╝
 """
 
-from flask import Flask, request, Response
+from flask import Flask, request, Response, session, redirect, url_for
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from twilio.rest import Client
 import anthropic
@@ -22,6 +22,7 @@ import urllib.parse
 import datetime
 
 app = Flask(__name__)
+app.secret_key = os.getenv("SECRET_KEY", "pooja-ravi-2026-secret")
 
 # ============================================================
 # CREDENTIALS
@@ -317,8 +318,13 @@ def pooja_ui():
         if pwd != UI_PASSWORD:
             error = 'Wrong password.'
         else:
-            contacts_json = json.dumps(CONTACTS)
-            html = """<!DOCTYPE html>
+            session['authed'] = True
+            return redirect('/pooja')
+    if not session.get('authed'):
+        pass  # show login
+    else:
+        contacts_json = json.dumps(CONTACTS)
+        html = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -626,8 +632,8 @@ setInterval(loadLogs, 15000);
 
 </body>
 </html>"""
-            html = html.replace('CONTACTS_PLACEHOLDER', contacts_json)
-            return Response(html, mimetype='text/html')
+        html = html.replace('CONTACTS_PLACEHOLDER', contacts_json)
+        return Response(html, mimetype='text/html')
 
     login_html = """<!DOCTYPE html>
 <html lang="en">
