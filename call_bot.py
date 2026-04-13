@@ -345,7 +345,10 @@ input::placeholder{color:#444;}
 </div>
 <button class="call-btn" id="call-btn" onclick="makeCall()">&#128222; Call Now</button>
 <div class="status" id="status"></div>
-<div class="logs-title">&#128222; Call History</div>
+<div style="display:flex;justify-content:space-between;align-items:center;margin-top:24px;margin-bottom:14px;">
+  <div style="font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:#666;">&#128222; Call History</div>
+  <button onclick="loadLogs()" style="background:#1a1a26;border:1px solid #1e1e2e;border-radius:8px;color:#a78bfa;font-size:12px;padding:6px 14px;cursor:pointer;">&#8635; Refresh</button>
+</div>
 <div id="logs-container"><div style="color:#555;font-size:13px;text-align:center;padding:16px;">No calls yet.</div></div>
 <script>
 var callType = 'checkin';
@@ -401,7 +404,6 @@ function loadLogs() {
 }
 function toggleTr(sid) { var el=document.getElementById('tr-'+sid); if(el) el.style.display=el.style.display==='none'?'block':'none'; }
 loadLogs();
-setInterval(loadLogs, 15000);
 </script>
 </body>
 </html>"""
