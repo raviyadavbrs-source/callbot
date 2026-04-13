@@ -326,7 +326,9 @@ input::placeholder{color:#444;}
   <p class="sub">Mr. Ravi's Personal Assistant</p>
 </div>
 <div class="card">
-  <div class="label">Phone Number</div>
+  <div class="label">Name</div>
+  <input type="text" id="name-input" placeholder="e.g. Sameer" style="margin-bottom:10px;">
+  <div class="label" style="margin-top:4px;">Phone Number</div>
   <input type="tel" id="phone-input" placeholder="+91 98290 55878">
 </div>
 <div class="card">
@@ -364,7 +366,8 @@ async function makeCall() {
   }
   var btn = document.getElementById('call-btn');
   btn.disabled = true; btn.textContent = 'Calling...';
-  var body = { to: phone, call_type: callType };
+  var fname = document.getElementById('name-input').value.trim();
+  var body = { to: phone, call_type: callType, friend_name: fname || phone };
   if (callType === 'plan') {
     body.time  = document.getElementById('time-input').value.trim();
     body.place = document.getElementById('place-input').value.trim();
@@ -538,9 +541,9 @@ def outbound_start():
         call_meta[call_sid]    = {'type': call_type, 'time': time, 'place': place, 'friend_name': friend_name, 'language': 'english'}
 
     if call_type == 'plan':
-        opening = f"Hi, this is Pooja calling on behalf of Mr. Ravi. I wanted to check if you are free to meet him at {place} around {time}?"
+        opening = f"Hello, is this {friend_name}? This is Pooja calling on behalf of Mr. Ravi. I was wondering if you are available to meet him at {place} around {time}?"
     else:
-        opening = "Hi, this is Pooja calling on behalf of Mr. Ravi. He asked me to check in on you and see how you are doing."
+        opening = f"Hello, is this {friend_name}? This is Pooja calling on behalf of Mr. Ravi. He wanted me to check in on you and see how you have been doing."
 
     response = VoiceResponse()
     play_audio_or_say(response, opening, voice_id=POOJA_VOICE_ID, fallback_lang='en-US')
@@ -554,7 +557,7 @@ def outbound_start():
         method='POST',
         speech_timeout=3,
         language='en-US',
-        enhanced=True
+        speech_model='phone_call'
     )
     response.append(gather)
     response.redirect('/call/outbound/start?' + request.query_string.decode())
@@ -571,7 +574,7 @@ def outbound_respond():
     response = VoiceResponse()
     if not friend_text:
         gather = Gather(input='speech', action='/call/outbound/respond',
-                        method='POST', speech_timeout=3, language='hi-IN', enhanced=True)
+                        method='POST', speech_timeout=3, language='hi-IN', speech_model='phone_call')
         response.say("Sorry, I didn't catch that. Could you say that again?", voice='alice', language='hi-IN')
         response.append(gather)
         return str(response)
@@ -588,7 +591,7 @@ def outbound_respond():
         response.hangup()
     else:
         gather = Gather(input='speech', action='/call/outbound/respond',
-                        method='POST', speech_timeout=3, language='hi-IN', enhanced=True)
+                        method='POST', speech_timeout=3, language='hi-IN', speech_model='phone_call')
         response.append(gather)
     return str(response)
 
@@ -610,7 +613,7 @@ def incoming_call():
     is_indian = caller.startswith('+91') or caller.startswith('0091')
     lang = 'hi-IN' if is_indian else 'en-US'
     gather = Gather(input='speech', action=f'/call/respond?detected_lang={lang}',
-                    method='POST', speech_timeout=2, language=lang, enhanced=True)
+                    method='POST', speech_timeout=2, language=lang, speech_model='phone_call')
     gather.say("Bol." if is_indian else "Yeah?", voice='alice',
                language='hi-IN' if is_indian else 'en-US')
     response.append(gather)
@@ -630,7 +633,7 @@ def respond():
     response = VoiceResponse()
     if not caller_text:
         gather = Gather(input='speech', action=f'/call/respond?detected_lang={twilio_lang}',
-                        method='POST', speech_timeout=2, language=twilio_lang, enhanced=True)
+                        method='POST', speech_timeout=2, language=twilio_lang, speech_model='phone_call')
         gather.say("Kya bola? Suna nahi." if language=='hindi' else "Didn't catch that mate.",
                    voice='alice', language='hi-IN' if language=='hindi' else 'en-AU')
         response.append(gather)
@@ -640,7 +643,7 @@ def respond():
     play_audio_or_say(response, reply, language=language,
                       fallback_lang='hi-IN' if language=='hindi' else 'en-AU')
     gather = Gather(input='speech', action=f'/call/respond?detected_lang={twilio_lang}',
-                    method='POST', speech_timeout=2, language=twilio_lang, enhanced=True)
+                    method='POST', speech_timeout=2, language=twilio_lang, speech_model='phone_call')
     response.append(gather)
     return str(response)
 
