@@ -1,28 +1,33 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║              WINSB2026 — SARCASTIC CALL BOT + POOJA ASSISTANT        ║
+║         WINSB2026 — JESSICA + BUNTY CALL BOT (WebSocket Version)     ║
 ║                                                                      ║
-║  Incoming call → Sarcastic bot answers                               ║
-║  /jessica → Mobile UI to trigger Pooja outbound calls                  ║
-║  Plan Call  → Pooja fixes a meetup                                   ║
-║  Check-in   → Pooja casually checks in on Ravi's behalf              ║
+║  Architecture:                                                       ║
+║  Twilio Media Streams → Deepgram real-time STT                       ║
+║  → Claude Haiku → ElevenLabs Flash streaming TTS                     ║
+║  → back to Twilio via WebSocket                                      ║
+║                                                                      ║
+║  Result: ~1 second response time                                     ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """
 
-from flask import Flask, request, Response, session, redirect, url_for
-from twilio.twiml.voice_response import VoiceResponse, Gather
+from flask import Flask, request, Response
+from flask_sock import Sock
+from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
 from twilio.rest import Client
 import anthropic
 import requests
-import tempfile
 import os
 import json
 import threading
 import urllib.parse
 import datetime
+import base64
+import audioop
+import time
 
-app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", "pooja-ravi-2026-secret")
+app  = Flask(__name__)
+sock = Sock(app)
 
 # ============================================================
 # CREDENTIALS
@@ -34,13 +39,13 @@ ANTHROPIC_API_KEY   = os.getenv("ANTHROPIC_API_KEY")
 ELEVENLABS_API_KEY  = os.getenv("ELEVENLABS_API_KEY", "")
 DEEPGRAM_API_KEY    = os.getenv("DEEPGRAM_API_KEY", "d86f846652be259f234acad143a0f9d4e3027cba")
 UI_PASSWORD         = os.getenv("UI_PASSWORD", "ravi2026")
+BASE_URL            = os.getenv("BASE_URL", "https://callbot-production-a211.up.railway.app")
 
 # ============================================================
-# VOICE IDs
+# VOICE IDs (ElevenLabs)
 # ============================================================
-HINDI_VOICE_ID   = "ibbx9zDYGvLgtYzRbqqG"
-ENGLISH_VOICE_ID = "nwj0s2LU9bDWRKND5yzA"
-JESSICA_VOICE_ID   = "EXAVITQu4vr4xnSDxMaL"   # Jessica — female US accent (Sarah)
+JESSICA_VOICE_ID = "EXAVITQu4vr4xnSDxMaL"   # Sarah — US female
+BUNTY_VOICE_ID   = "ibbx9zDYGvLgtYzRbqqG"    # Bunty — Hindi male
 
 # ============================================================
 # CONTACTS
@@ -65,137 +70,129 @@ BLOCKED_NUMBERS = []
 # ============================================================
 # MEMORY
 # ============================================================
-call_history = {}
-call_meta    = {}
-call_logs    = []   # completed call log dicts, newest first
-call_lock    = threading.Lock()
+call_sessions = {}  # call_sid -> session dict
+call_logs     = []  # completed call logs
+call_lock     = threading.Lock()
 
 # ============================================================
-# SYSTEM PROMPTS — SARCASTIC INCOMING BOT
+# SYSTEM PROMPTS
 # ============================================================
-HINDI_SYSTEM_PROMPT = """Tu ek bahut zyada sarcastic, thoda irritated aur lazy banda hai jiska naam Ravi hai.
-Jab koi tumhe call karta hai, tum unhe seedha Haryanvi aur Hindi gaaliyon aur slangs mein reply karte ho.
-IMPORTANT RULES:
-- Bilkul bhi emoji mat use karo
-- Koi special characters mat use karo
-- Plain simple spoken language mein bolo — jaise real phone call ho
-- Short rakho — 1-3 sentences only
-- Bahut zyada sarcastic aur rude raho — jaise koi best friend hote hain jo gaaliyan deta hai
-- Haryanvi gaaliyan aur slangs zaroor use karo: teri maa ki, bhai, yaar, abe, saale, bc, mc, oye, chal hat, kya kar raha hai be, bakwaas band kar, teri toh, hadd hai, kameene, ullu, pagal hai kya, teri aakal ghaaswali hai, nikal yahan se, latth maar dunga
-- Jitna zyada ho sake utna entertaining aur abusive raho — yahi teri personality hai
-- Remember previous context in the call
-"""
-
-ENGLISH_SYSTEM_PROMPT = """You are Ravi, a sarcastic and slightly lazy bloke speaking in Australian English.
-IMPORTANT RULES:
-- Keep it short — 1-3 sentences only
-- Natural spoken language — like a real phone call
-- Use Australian slang: mate, bloody, crikey, no worries, reckon, heaps, arvo, strewth
-- Be funny and sarcastic but genuine
-- Remember previous context in the call
-"""
-
-# ============================================================
-# SYSTEM PROMPTS — POOJA
-# ============================================================
-def get_pooja_plan_prompt(time, place, language='english'):
-    return f"""You are Pooja, personal assistant to Mr. Ravi. You are calling to schedule a meetup.
-You speak classy, educated American English. The friend will reply in Hindi — understand it and always respond in English.
-
-YOUR GOAL: Confirm the friend is available to meet Mr. Ravi at {place} around {time}.
-
+def get_jessica_prompt(call_type, time='', place='', message='', friend_name=''):
+    if call_type == 'plan':
+        return f"""You are Jessica, personal assistant to Mr. Ravi Yadav. You are calling to schedule a meetup.
+You speak classy, educated American English. The friend may reply in Hindi — understand it and always respond in English.
+YOUR GOAL: Confirm the friend is available to meet Mr. Ravi Yadav at {place} around {time}.
 RULES:
-- Always reply in English only — warm, polite, professional
-- Short responses — 1-3 sentences only
+- Always reply in English — warm, polite, professional
+- Short responses — 1-2 sentences MAX
 - No emojis or special characters
-- If friend agrees → confirm, say Mr. Ravi is looking forward to it, wrap up
-- If friend suggests different time/place → acknowledge, confirm, say you will let Mr. Ravi know
+- If friend agrees → confirm, say Mr. Ravi Yadav is looking forward to it, end with [END_CALL]
+- If friend suggests different time/place → acknowledge, confirm, say you will let Mr. Ravi Yadav know, end with [END_CALL]
 - If friend is busy → ask if there is a better time
-- If friend ABUSES → sharp professional reply. E.g. "I beg your pardon? I am simply coordinating on Mr. Ravi's behalf."
-- Once plan confirmed → warm goodbye and end with exactly: [END_CALL]
-
-Opening: "Hello, this is Jessica calling on behalf of Mr. Ravi. I was wondering if you are available to meet him at {place} around {time}?"
-"""
-
-def get_pooja_checkin_prompt(language='english'):
-    return """You are Pooja, personal assistant to Mr. Ravi. You are calling to check in on one of his close friends.
-You speak classy, educated American English. The friend will reply in Hindi — understand it and always respond in English.
-
-YOUR GOAL: Have a warm, casual check-in conversation.
-
+- If friend ABUSES → sharp professional reply. E.g. "I beg your pardon? I am simply coordinating on Mr. Ravi Yadav's behalf."
+- Once plan confirmed → end with exactly: [END_CALL]"""
+    elif call_type == 'message':
+        return f"""You are Jessica, personal assistant to Mr. Ravi Yadav. You are calling to deliver a message.
+You speak classy, educated American English. The friend may reply in Hindi — understand it and always respond in English.
+THE MESSAGE: {message}
 RULES:
-- Always reply in English only — warm, friendly, conversational
-- Short responses — 1-3 sentences
+- Always reply in English — warm, polite, professional
+- Deliver the message elaborately in 2-3 sentences — add warmth and context
+- After delivering, say Mr. Ravi Yadav sends his best regards
+- Ask: "Is there any message you'd like me to convey back to Mr. Ravi Yadav?"
+- After their reply → acknowledge warmly, say you will pass it on, end with [END_CALL]
+- If friend ABUSES → sharp professional reply then continue
+- When wrapping up → end with exactly: [END_CALL]"""
+    else:  # checkin
+        return f"""You are Jessica, personal assistant to Mr. Ravi Yadav. You are calling to check in on one of his friends.
+You speak classy, educated American English. The friend may reply in Hindi — understand it and always respond in English.
+RULES:
+- Always reply in English — warm, friendly, conversational
+- Short responses — 1-2 sentences MAX
 - No emojis or special characters
-- Opening: "Hello, this is Jessica calling on behalf of Mr. Ravi. He wanted me to check in on you and see how you have been doing."
 - Be genuinely interested — ask follow-up questions
 - Keep it light and positive
 - After 3-4 exchanges wrap up naturally
-- If friend ABUSES → sharp professional reply. E.g. "I appreciate if we could keep this courteous. Now, how have you been?"
-- When ready to end, finish with exactly: [END_CALL]
-"""
+- If friend ABUSES → sharp professional reply. E.g. "I appreciate if we could keep this courteous."
+- When ready to end → end with exactly: [END_CALL]"""
 
-
+def get_bunty_prompt(call_type, time='', place='', message='', friend_name=''):
+    if call_type == 'plan':
+        return f"""Tu Bunty hai, Ravi ka khaas yaar. Tu outbound call kar raha hai {friend_name} ko milne ka plan fix karne ke liye.
+GOAL: Confirm kar ki yaar {place} pe {time} ko Ravi se milne ke liye free hai.
+RULES:
+- Haryanvi/Hindi mein baat kar — bilkul natural
+- Chhota rakho — 1-2 sentences MAX
+- Gaaliyan aur slangs use kar: bhai, yaar, abe, saale, bc, oye
+- Agar agree kare → confirm karo aur [END_CALL] likho
+- Agar alag time/place bole → acknowledge karo, confirm karo, [END_CALL] likho
+- Plan confirm hone pe exactly: [END_CALL]"""
+    elif call_type == 'message':
+        return f"""Tu Bunty hai, Ravi ka khaas yaar. Tu ek message deliver karne ke liye call kar raha hai.
+MESSAGE: {message}
+RULES:
+- Haryanvi/Hindi mein baat kar
+- Message naturally deliver kar — thoda elaborate karo
+- Phir poochho koi message hai Ravi ke liye
+- Unka reply acknowledge karo aur [END_CALL] likho"""
+    else:
+        return f"""Tu Bunty hai, Ravi ka khaas yaar. Tu {friend_name} ka haal-chaal poochhne ke liye call kar raha hai.
+RULES:
+- Haryanvi/Hindi mein baat kar — bilkul natural
+- Chhota rakho — 1-2 sentences MAX
+- Gaaliyan aur slangs use kar warmly
+- 3-4 exchanges ke baad naturally wrap up karo aur [END_CALL] likho"""
 
 # ============================================================
-# DEEPGRAM TRANSCRIPTION
+# ELEVENLABS TTS — streaming, returns audio bytes
 # ============================================================
-def transcribe_with_deepgram(audio_url):
-    """Transcribe audio URL using Deepgram — fast Hindi/English recognition."""
+def generate_speech(text, voice_id):
+    if not ELEVENLABS_API_KEY:
+        return None
     try:
-        headers = {
-            "Authorization": f"Token {DEEPGRAM_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "url": audio_url
-        }
-        params = {
-            "model": "nova-2",
-            "language": "hi",
-            "smart_format": True,
-            "punctuate": True
-        }
         resp = requests.post(
-            "https://api.deepgram.com/v1/listen",
-            headers=headers,
-            json=payload,
-            params=params,
-            timeout=10
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream",
+            json={
+                "text": text,
+                "model_id": "eleven_flash_v2_5",
+                "voice_settings": {"stability": 0.5, "similarity_boost": 0.75,
+                                   "style": 0.0, "use_speaker_boost": False},
+                "output_format": "ulaw_8000"
+            },
+            headers={"Accept": "audio/basic", "Content-Type": "application/json",
+                     "xi-api-key": ELEVENLABS_API_KEY},
+            stream=True,
+            timeout=15
         )
         if resp.status_code == 200:
-            result = resp.json()
-            transcript = result["results"]["channels"][0]["alternatives"][0]["transcript"]
-            return transcript.strip()
+            audio = b""
+            for chunk in resp.iter_content(chunk_size=4096):
+                if chunk:
+                    audio += chunk
+            return audio
     except Exception as e:
-        print(f"Deepgram error: {e}")
-    return ""
+        print(f"ElevenLabs error: {e}")
+    return None
 
 # ============================================================
-# LANGUAGE DETECTION
+# CLAUDE — generate reply
 # ============================================================
-def detect_language(text):
-    hindi_chars = set('अआइईउऊएऐओऔकखगघचछजझटठडढणतथदधनपफबभमयरलवशषसह')
-    hindi_words = {'kya','hai','nahi','haan','bhai','yaar','abe','saale',
-                   'karo','bolo','main','mein','tera','mera','aur',
-                   'theek','achha','kal','aaj','baat','kaam','bc','oye'}
-    if any(c in hindi_chars for c in text):
-        return 'hindi'
-    if len(set(text.lower().split()).intersection(hindi_words)) >= 1:
-        return 'hindi'
-    return 'english'
-
-# ============================================================
-# CLAUDE — SARCASTIC REPLY
-# ============================================================
-def get_sarcastic_reply(call_sid, caller_text, language):
+def get_ai_reply(session, user_text):
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    with call_lock:
-        if call_sid not in call_history:
-            call_history[call_sid] = []
-        history = call_history[call_sid].copy()
-    history.append({"role": "user", "content": caller_text})
-    system = HINDI_SYSTEM_PROMPT if language == 'hindi' else ENGLISH_SYSTEM_PROMPT
+    call_type   = session.get('call_type', 'checkin')
+    bot         = session.get('bot', 'jessica')
+    friend_name = session.get('friend_name', '')
+    history     = session.get('history', [])
+
+    if bot == 'bunty':
+        system = get_bunty_prompt(call_type, session.get('time',''),
+                                   session.get('place',''), session.get('message',''), friend_name)
+    else:
+        system = get_jessica_prompt(call_type, session.get('time',''),
+                                     session.get('place',''), session.get('message',''), friend_name)
+
+    history.append({"role": "user", "content": user_text})
+
     try:
         resp = client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -204,125 +201,405 @@ def get_sarcastic_reply(call_sid, caller_text, language):
             messages=history
         )
         reply = resp.content[0].text.strip()
-        with call_lock:
-            call_history[call_sid].append({"role": "user",      "content": caller_text})
-            call_history[call_sid].append({"role": "assistant", "content": reply})
-            if len(call_history[call_sid]) > 12:
-                call_history[call_sid] = call_history[call_sid][-12:]
+        history.append({"role": "assistant", "content": reply})
+        session['history'] = history[-12:]  # keep last 6 exchanges
         return reply
     except Exception as e:
         print(f"Claude error: {e}")
-        return "Bhai main thoda busy hoon" if language == 'hindi' else "Mate, caught me at a bad time"
+        return "I'm sorry, could you repeat that?"
 
 # ============================================================
-# CLAUDE — POOJA REPLY
+# DEEPGRAM — real-time transcription via WebSocket
 # ============================================================
-def get_pooja_reply(call_sid, friend_text):
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+def start_deepgram_stream(on_transcript, language='hi'):
+    import websocket as ws_client
+
+    dg_url = f"wss://api.deepgram.com/v1/listen?model=nova-2&language={language}&encoding=mulaw&sample_rate=8000&interim_results=true&endpointing=500&smart_format=true"
+
+    transcripts = {'pending': '', 'final': ''}
+    dg_ws = [None]
+
+    def on_message(ws, message):
+        try:
+            data = json.loads(message)
+            if data.get('type') == 'Results':
+                alt = data['channel']['alternatives'][0]
+                text = alt.get('transcript', '').strip()
+                is_final = data.get('is_final', False)
+                if text:
+                    if is_final:
+                        transcripts['final'] = text
+                        on_transcript(text, is_final=True)
+                    else:
+                        transcripts['pending'] = text
+        except Exception as e:
+            print(f"Deepgram message error: {e}")
+
+    def on_error(ws, error):
+        print(f"Deepgram WS error: {error}")
+
+    def on_open(ws):
+        print("Deepgram connected")
+        dg_ws[0] = ws
+
+    dg = ws_client.WebSocketApp(
+        dg_url,
+        header={"Authorization": f"Token {DEEPGRAM_API_KEY}"},
+        on_message=on_message,
+        on_error=on_error,
+        on_open=on_open
+    )
+
+    t = threading.Thread(target=dg.run_forever, daemon=True)
+    t.start()
+
+    # Wait for connection
+    for _ in range(20):
+        if dg_ws[0]:
+            break
+        time.sleep(0.1)
+
+    return dg, dg_ws
+
+# ============================================================
+# TWILIO MEDIA STREAM WEBSOCKET HANDLER
+# ============================================================
+@sock.route('/media-stream')
+def media_stream(ws):
+    """Handle Twilio Media Stream WebSocket."""
+    print("\n🎙️ Media stream connected")
+
+    call_sid    = None
+    session     = None
+    dg          = None
+    dg_ws       = [None]
+    stream_sid  = None
+    speaking    = False
+    reply_lock  = threading.Lock()
+    last_transcript = ''
+
+    def send_audio_to_twilio(audio_bytes):
+        """Send mulaw audio back to Twilio."""
+        nonlocal speaking
+        if not audio_bytes or not stream_sid:
+            return
+        speaking = True
+        chunk_size = 160  # 20ms chunks at 8000hz mulaw
+        for i in range(0, len(audio_bytes), chunk_size):
+            chunk = audio_bytes[i:i+chunk_size]
+            payload = base64.b64encode(chunk).decode('utf-8')
+            msg = json.dumps({
+                "event": "media",
+                "streamSid": stream_sid,
+                "media": {"payload": payload}
+            })
+            try:
+                ws.send(msg)
+            except:
+                break
+            time.sleep(0.018)  # ~20ms pacing
+        # Send mark to know when done
+        ws.send(json.dumps({"event": "mark", "streamSid": stream_sid, "mark": {"name": "done"}}))
+        speaking = False
+
+    def handle_transcript(text, is_final=False):
+        nonlocal last_transcript
+        if not is_final or not text or speaking:
+            return
+        if text == last_transcript:
+            return
+        last_transcript = text
+        print(f"  👂 [{session.get('bot','jessica')}] Friend: {text}")
+
+        def process():
+            reply = get_ai_reply(session, text)
+            print(f"  💬 Reply: {reply}")
+
+            end_call = '[END_CALL]' in reply
+            clean    = reply.replace('[END_CALL]', '').strip()
+
+            voice_id = BUNTY_VOICE_ID if session.get('bot') == 'bunty' else JESSICA_VOICE_ID
+            audio    = generate_speech(clean, voice_id)
+
+            if audio:
+                send_audio_to_twilio(audio)
+            
+            # Log exchange
+            session.setdefault('transcript_log', [])
+            session['transcript_log'].append(f"Friend: {text}")
+            session['transcript_log'].append(f"{'Bunty' if session.get('bot')=='bunty' else 'Jessica'}: {clean}")
+
+            if end_call:
+                time.sleep(1)
+                try:
+                    twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+                    twilio_client.calls(session.get('call_sid','')).update(status='completed')
+                except:
+                    pass
+
+        with reply_lock:
+            t = threading.Thread(target=process, daemon=True)
+            t.start()
+
+    try:
+        while True:
+            message = ws.receive()
+            if message is None:
+                break
+
+            data = json.loads(message)
+            event = data.get('event')
+
+            if event == 'start':
+                stream_sid = data['start']['streamSid']
+                call_sid   = data['start']['callSid']
+                print(f"  📞 Stream started | Call: {call_sid}")
+
+                with call_lock:
+                    session = call_sessions.get(call_sid, {})
+                    if session:
+                        session['call_sid'] = call_sid
+
+                if not session:
+                    print("  ⚠️ No session found for call")
+                    break
+
+                # Start Deepgram
+                lang = 'hi' if session.get('bot') == 'bunty' else 'hi'  # always Hindi input
+                dg, dg_ws = start_deepgram_stream(handle_transcript, language=lang)
+
+                # Play opening line
+                def play_opening():
+                    time.sleep(0.5)
+                    opening = session.get('opening', '')
+                    if opening:
+                        voice_id = BUNTY_VOICE_ID if session.get('bot') == 'bunty' else JESSICA_VOICE_ID
+                        audio = generate_speech(opening, voice_id)
+                        if audio:
+                            send_audio_to_twilio(audio)
+                        session.setdefault('transcript_log', [])
+                        session['transcript_log'].append(f"{'Bunty' if session.get('bot')=='bunty' else 'Jessica'}: {opening}")
+
+                threading.Thread(target=play_opening, daemon=True).start()
+
+            elif event == 'media':
+                # Forward audio to Deepgram
+                if dg_ws[0]:
+                    payload = base64.b64decode(data['media']['payload'])
+                    try:
+                        dg_ws[0].send_binary(payload)
+                    except:
+                        pass
+
+            elif event == 'mark':
+                pass  # audio playback done marker
+
+            elif event == 'stop':
+                print(f"  📵 Stream stopped")
+                break
+
+    except Exception as e:
+        print(f"Media stream error: {e}")
+    finally:
+        # Close Deepgram
+        if dg:
+            try:
+                dg.close()
+            except:
+                pass
+        # Save call log
+        if session and call_sid:
+            _save_call_log(call_sid, session)
+
+def _save_call_log(call_sid, session):
+    log = {
+        'call_sid':      call_sid,
+        'friend_name':   session.get('friend_name', 'Unknown'),
+        'bot':           session.get('bot', 'jessica'),
+        'call_type':     session.get('call_type', 'checkin'),
+        'time_proposed': session.get('time', ''),
+        'place':         session.get('place', ''),
+        'duration':      str(int(time.time() - session.get('start_time', time.time()))),
+        'status':        'completed',
+        'timestamp':     datetime.datetime.now().strftime('%d %b %Y, %I:%M %p'),
+        'transcript':    session.get('transcript_log', []),
+        'recording_url': None,
+    }
     with call_lock:
-        if call_sid not in call_history:
-            call_history[call_sid] = []
-        meta    = call_meta.get(call_sid, {})
-        history = call_history[call_sid].copy()
+        call_logs.insert(0, log)
+        if len(call_logs) > 50:
+            call_logs.pop()
+        call_sessions.pop(call_sid, None)
 
-    call_type = meta.get('type', 'checkin')
-    bot       = meta.get('bot', 'jessica')
-    language  = detect_language(friend_text)
+# ============================================================
+# OUTBOUND CALL — TRIGGER
+# ============================================================
+@app.route('/call/outbound', methods=['POST'])
+def outbound_call():
+    data        = request.get_json(force=True) or {}
+    to          = data.get('to', '').strip()
+    call_type   = data.get('call_type', 'checkin')
+    time_       = data.get('time', '').strip()
+    place       = data.get('place', '').strip()
+    message     = data.get('message', '').strip()
+    friend_name = data.get('friend_name', '').strip() or to
+    bot         = data.get('bot', 'jessica')
 
-    # Update language in meta
-    with call_lock:
-        call_meta[call_sid]['language'] = language
+    if not to:
+        return {"error": "to is required"}, 400
+    if call_type == 'plan' and (not time_ or not place):
+        return {"error": "time and place required"}, 400
+    if call_type == 'message' and not message:
+        return {"error": "message required"}, 400
 
+    # Build opening line
     if bot == 'bunty':
-        system = get_bunty_prompt(call_type, meta.get('time',''), meta.get('place',''), meta.get('message',''))
-    elif call_type == 'plan':
-        system = get_pooja_plan_prompt(meta.get('time', 'soon'), meta.get('place', 'the usual spot'), language)
-    elif call_type == 'message':
-        system = get_pooja_message_prompt(meta.get('message', ''))
+        if call_type == 'plan':
+            opening = f"Oye {friend_name} bhai, Bunty bol raha hoon. Abe sun, Ravi pooch raha tha ki {time_} ko {place} pe milna ho sakta hai kya?"
+        elif call_type == 'message':
+            opening = f"Oye {friend_name} bhai, Bunty bol raha hoon, Ravi ki taraf se ek baat pohnchaani thi."
+        else:
+            opening = f"Oye {friend_name} bhai, Bunty bol raha hoon. Ravi ne bola tha tera haal-chaal poochhun. Kya scene hai tera?"
     else:
-        system = get_pooja_checkin_prompt(language)
-    history.append({"role": "user", "content": friend_text})
+        name_part = f"Hello, is this {friend_name}? " if friend_name and not friend_name.startswith('+') and not friend_name.isdigit() else "Hello! "
+        if call_type == 'plan':
+            opening = name_part + f"This is Jessica, personal assistant to Mr. Ravi Yadav. I was wondering if you are available to meet him at {place} around {time_}?"
+        elif call_type == 'message':
+            opening = name_part + "This is Jessica, personal assistant to Mr. Ravi Yadav. I am calling to pass on a message from him."
+        else:
+            opening = name_part + "This is Jessica, personal assistant to Mr. Ravi Yadav. He wanted me to check in on you and see how you have been doing."
+
     try:
-        resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=200,
-            system=system,
-            messages=history
+        twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        call = twilio_client.calls.create(
+            to=to,
+            from_=TWILIO_PHONE_NUMBER,
+            url=f"{BASE_URL}/call/outbound/twiml",
+            status_callback=f"{BASE_URL}/call/status",
+            status_callback_method='POST',
+            record=True
         )
-        reply = resp.content[0].text.strip()
+
+        # Store session
         with call_lock:
-            call_history[call_sid].append({"role": "user",      "content": friend_text})
-            call_history[call_sid].append({"role": "assistant", "content": reply})
-            if len(call_history[call_sid]) > 12:
-                call_history[call_sid] = call_history[call_sid][-12:]
-        return reply
+            call_sessions[call.sid] = {
+                'call_type':   call_type,
+                'bot':         bot,
+                'friend_name': friend_name,
+                'time':        time_,
+                'place':       place,
+                'message':     message,
+                'opening':     opening,
+                'history':     [],
+                'start_time':  time.time(),
+            }
+
+        print(f"\n📤 Outbound [{bot}|{call_type}] → {friend_name} | SID: {call.sid}")
+        return {"status": "calling", "sid": call.sid}, 200
+
     except Exception as e:
-        print(f"Claude error (Pooja): {e}")
-        return "I am so sorry, I will have Mr. Ravi follow up with you directly."
+        print(f"  ❌ {e}")
+        return {"error": str(e)}, 500
 
 # ============================================================
-# ELEVENLABS TTS
+# TWIML — connect call to media stream
 # ============================================================
-def text_to_speech(text, voice_id=None, language='english'):
-    if voice_id is None:
-        voice_id = HINDI_VOICE_ID if language == 'hindi' else ENGLISH_VOICE_ID
-    if not ELEVENLABS_API_KEY:
-        return None
+@app.route('/call/outbound/twiml', methods=['POST'])
+def outbound_twiml():
+    """Return TwiML that connects the call to our WebSocket media stream."""
+    response = VoiceResponse()
+    connect  = Connect()
+    connect.stream(url=f"wss://{BASE_URL.replace('https://','').replace('http://','')}/media-stream")
+    response.append(connect)
+    return str(response), 200, {'Content-Type': 'text/xml'}
+
+# ============================================================
+# INCOMING CALL — sarcastic bot (keep existing logic with Gather)
+# ============================================================
+@app.route('/call/incoming', methods=['POST'])
+def incoming_call():
+    caller   = request.form.get('From', '')
+    call_sid = request.form.get('CallSid', '')
+    print(f"\n📞 Incoming from {caller}")
+    response = VoiceResponse()
+    if any(caller.endswith(b.replace('+91','').replace('+','')) for b in BLOCKED_NUMBERS if b):
+        response.say("Hello, please leave a message.", voice='alice', language='en-IN')
+        response.hangup()
+        return str(response)
+    is_indian = caller.startswith('+91') or caller.startswith('0091')
+    lang = 'hi-IN' if is_indian else 'en-US'
+    from twilio.twiml.voice_response import Gather
+    gather = Gather(input='speech', action=f'/call/respond?lang={lang}',
+                    method='POST', speech_timeout=2, language=lang, speech_model='phone_call')
+    gather.say("Bol." if is_indian else "Yeah?", voice='Polly.Aditi' if is_indian else 'Polly.Joanna-Neural',
+               language=lang)
+    response.append(gather)
+    response.redirect('/call/incoming')
+    return str(response)
+
+@app.route('/call/respond', methods=['POST'])
+def respond():
+    from twilio.twiml.voice_response import Gather
+    caller_text = request.form.get('SpeechResult', '').strip()
+    call_sid    = request.form.get('CallSid', '')
+    lang        = request.args.get('lang', 'hi-IN')
+    language    = 'english' if lang.startswith('en') else 'hindi'
+    response    = VoiceResponse()
+
+    if not caller_text:
+        gather = Gather(input='speech', action=f'/call/respond?lang={lang}',
+                        method='POST', speech_timeout=2, language=lang, speech_model='phone_call')
+        gather.say("Kya bola?" if language == 'hindi' else "Didn't catch that.",
+                   voice='Polly.Aditi' if language=='hindi' else 'Polly.Joanna-Neural', language=lang)
+        response.append(gather)
+        return str(response)
+
+    # Quick sarcastic reply via Claude
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    system = """Tu ek bahut zyada sarcastic, thoda irritated aur lazy banda hai jiska naam Ravi hai. Hindi/Haryanvi gaaliyan use kar. Short rakho - 1-2 sentences.""" if language == 'hindi' else """You are Ravi, sarcastic Australian bloke. Short replies, Australian slang. 1-2 sentences."""
     try:
-        # Use streaming endpoint for lower latency
-        resp = requests.post(
-            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream",
-            json={
-                "text": text,
-                "model_id": "eleven_flash_v2_5",
-                "voice_settings": {"stability": 0.5, "similarity_boost": 0.75,
-                                   "style": 0.0, "use_speaker_boost": False}
-            },
-            headers={"Accept": "audio/mpeg", "Content-Type": "application/json",
-                     "xi-api-key": ELEVENLABS_API_KEY},
-            stream=True,
-            timeout=10
-        )
-        if resp.status_code == 200:
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
-            for chunk in resp.iter_content(chunk_size=4096):
-                if chunk:
-                    tmp.write(chunk)
-            tmp.close()
-            return tmp.name
-    except Exception as e:
-        print(f"ElevenLabs error: {e}")
-    return None
+        r = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=100,
+                                    system=system, messages=[{"role":"user","content":caller_text}])
+        reply = r.content[0].text.strip()
+    except:
+        reply = "Bhai busy hoon" if language == 'hindi' else "Mate, bad time"
 
-def play_audio_or_say(response, text, voice_id=None, language='english', fallback_lang='en-US'):
-    # Use Twilio Polly voices — instant, no file generation
-    if language == 'hindi' or fallback_lang == 'hi-IN':
-        # Hindi — Polly Aditi (Indian Hindi female)
-        response.say(text, voice='Polly.Aditi', language='hi-IN')
-    else:
-        # English — Polly Joanna (American female, clear and natural)
-        response.say(text, voice='Polly.Joanna-Neural', language='en-US')
+    response.say(reply, voice='Polly.Aditi' if language=='hindi' else 'Polly.Joanna-Neural', language=lang)
+    gather = Gather(input='speech', action=f'/call/respond?lang={lang}',
+                    method='POST', speech_timeout=2, language=lang, speech_model='phone_call')
+    response.append(gather)
+    return str(response)
 
 # ============================================================
-# SERVE AUDIO
+# CALL STATUS
 # ============================================================
-@app.route('/audio/<filename>')
-def serve_audio(filename):
-    filepath = os.path.join(tempfile.gettempdir(), filename)
-    if os.path.exists(filepath):
-        with open(filepath, 'rb') as f:
-            data = f.read()
-        return Response(data, mimetype='audio/mpeg')
-    return "Not found", 404
+@app.route('/call/status', methods=['POST'])
+def call_status():
+    call_sid = request.form.get('CallSid', '')
+    status   = request.form.get('CallStatus', '')
+    duration = request.form.get('CallDuration', '0')
+    print(f"\n📵 {call_sid} | {status} | {duration}s")
+    with call_lock:
+        session = call_sessions.pop(call_sid, None)
+    if session:
+        _save_call_log(call_sid, session)
+    return '', 200
 
 # ============================================================
-# POOJA MOBILE UI
+# LOGS API
 # ============================================================
-@app.route('/jessica', methods=['GET', 'POST'])
+@app.route('/jessica/logs', methods=['GET'])
+def get_logs():
+    with call_lock:
+        logs = list(call_logs)
+    return json.dumps(logs), 200, {'Content-Type': 'application/json'}
+
+# ============================================================
+# JESSICA UI
+# ============================================================
+@app.route('/jessica', methods=['GET'])
 def jessica_ui():
-    contacts_json = json.dumps(CONTACTS)
-    if True:
-        html = """<!DOCTYPE html>
+    html = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -351,39 +628,39 @@ textarea{min-height:80px;resize:vertical;}
 .toggle-row{display:flex;gap:8px;flex-wrap:wrap;}
 .toggle-btn{flex:1;min-width:80px;padding:10px 8px;border-radius:10px;border:2px solid #1e1e2e;background:#1a1a26;color:#888;font-size:12px;font-weight:600;cursor:pointer;text-align:center;}
 .toggle-btn.selected{border-color:#db2777;background:#1f0f1a;color:#f472b6;}
-.toggle-btn.bunty-selected{border-color:#dc2626;background:#1f0a0a;color:#f87171;}
+.toggle-btn.bunty-sel{border-color:#dc2626;background:#1f0a0a;color:#f87171;}
 .call-btn{width:100%;padding:15px;border-radius:13px;border:none;color:white;font-size:15px;font-weight:700;cursor:pointer;margin-top:4px;}
-.call-btn.jessica-btn{background:linear-gradient(135deg,#7c3aed,#db2777);box-shadow:0 4px 18px rgba(124,58,237,0.35);}
-.call-btn.bunty-btn{background:linear-gradient(135deg,#b45309,#dc2626);box-shadow:0 4px 18px rgba(180,83,9,0.35);}
+.call-btn.j{background:linear-gradient(135deg,#7c3aed,#db2777);box-shadow:0 4px 18px rgba(124,58,237,0.35);}
+.call-btn.b{background:linear-gradient(135deg,#b45309,#dc2626);box-shadow:0 4px 18px rgba(180,83,9,0.35);}
 .call-btn:disabled{opacity:0.4;}
 .status{text-align:center;padding:12px;border-radius:10px;font-size:13px;font-weight:500;margin-top:12px;display:none;}
 .status.success{background:#0d2010;color:#4ade80;border:1px solid #166534;}
 .status.error{background:#200d0d;color:#f87171;border:1px solid #7f1d1d;}
-.timer{text-align:center;font-size:22px;font-weight:700;color:#a78bfa;padding:10px 0;display:none;}
+.timer{text-align:center;font-size:28px;font-weight:700;color:#a78bfa;padding:12px 0;display:none;letter-spacing:2px;}
 .log-card{background:#13131a;border:1px solid #1e1e2e;border-radius:13px;padding:14px;margin-bottom:10px;}
 .log-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:5px;}
 .log-name{font-size:14px;font-weight:700;}
 .log-meta{font-size:11px;color:#555;margin-top:2px;}
-.log-status{font-size:10px;font-weight:700;padding:3px 8px;border-radius:20px;text-transform:uppercase;}
-.log-status.ok{background:#0d2010;color:#4ade80;}
-.log-status.na{background:#1f0f0f;color:#f87171;}
-.tr-toggle{background:#1a1a26;border:1px solid #1e1e2e;border-radius:8px;color:#888;font-size:11px;padding:5px 10px;cursor:pointer;margin-top:7px;}
-.transcript{margin-top:8px;background:#0d0d14;border-radius:9px;padding:10px;max-height:180px;overflow-y:auto;}
+.log-badge{font-size:10px;font-weight:700;padding:3px 8px;border-radius:20px;text-transform:uppercase;}
+.log-badge.ok{background:#0d2010;color:#4ade80;}
+.log-badge.na{background:#1f0f0f;color:#f87171;}
+.tr-btn{background:#1a1a26;border:1px solid #1e1e2e;border-radius:8px;color:#888;font-size:11px;padding:5px 10px;cursor:pointer;margin-top:7px;}
+.transcript{margin-top:8px;background:#0d0d14;border-radius:9px;padding:10px;max-height:200px;overflow-y:auto;}
 .tr-line{font-size:11px;color:#c8c8e0;margin-bottom:5px;line-height:1.5;}
-.tr-role{color:#a78bfa;font-weight:700;}
-.logs-header{display:flex;justify-content:space-between;align-items:center;margin-top:20px;margin-bottom:12px;}
-.logs-title{font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:#666;}
-.refresh-btn{background:#1a1a26;border:1px solid #1e1e2e;border-radius:8px;color:#a78bfa;font-size:11px;padding:5px 12px;cursor:pointer;}
+.tr-who{color:#a78bfa;font-weight:700;}
+.logs-hdr{display:flex;justify-content:space-between;align-items:center;margin-top:20px;margin-bottom:12px;}
+.logs-ttl{font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:#666;}
+.refresh{background:#1a1a26;border:1px solid #1e1e2e;border-radius:8px;color:#a78bfa;font-size:11px;padding:5px 12px;cursor:pointer;}
 </style>
 </head>
 <body>
 <div class="tabs">
-  <div class="tab active" id="tab-jessica" onclick="switchTab('jessica')">&#128188; Jessica</div>
-  <div class="tab" id="tab-bunty" onclick="switchTab('bunty')">&#128293; Bunty</div>
+  <div class="tab active" id="tab-j" onclick="switchTab('j')">&#128198; Jessica</div>
+  <div class="tab" id="tab-b" onclick="switchTab('b')">&#128293; Bunty</div>
 </div>
 
-<!-- JESSICA PANEL -->
-<div class="panel active" id="panel-jessica">
+<!-- JESSICA -->
+<div class="panel active" id="panel-j">
 <div class="header">
   <div class="avatar jessica">&#128198;</div>
   <h2>Jessica</h2>
@@ -398,33 +675,31 @@ textarea{min-height:80px;resize:vertical;}
 <div class="card">
   <div class="label">Call Type</div>
   <div class="toggle-row">
-    <div class="toggle-btn selected" id="j-btn-checkin" onclick="jSelectType('checkin')">&#128075; Check-in</div>
-    <div class="toggle-btn" id="j-btn-plan" onclick="jSelectType('plan')">&#128197; Plan Meet</div>
-    <div class="toggle-btn" id="j-btn-message" onclick="jSelectType('message')">&#128140; Message</div>
+    <div class="toggle-btn selected" id="j-t-checkin" onclick="jType('checkin')">&#128075; Check-in</div>
+    <div class="toggle-btn" id="j-t-plan" onclick="jType('plan')">&#128197; Plan Meet</div>
+    <div class="toggle-btn" id="j-t-message" onclick="jType('message')">&#128140; Message</div>
   </div>
 </div>
-<div class="card" id="j-plan-fields" style="display:none;">
-  <div class="label">Time</div>
-  <input type="text" id="j-time" placeholder="e.g. tomorrow 6pm" style="margin-bottom:10px;">
-  <div class="label" style="margin-top:4px;">Place</div>
-  <input type="text" id="j-place" placeholder="e.g. Cafe Coffee Day">
+<div class="card" id="j-plan" style="display:none;">
+  <div class="label">Time</div><input type="text" id="j-time" placeholder="e.g. tomorrow 6pm" style="margin-bottom:10px;">
+  <div class="label" style="margin-top:4px;">Place</div><input type="text" id="j-place" placeholder="e.g. Cafe Coffee Day">
 </div>
-<div class="card" id="j-message-fields" style="display:none;">
+<div class="card" id="j-msg" style="display:none;">
   <div class="label">Your Message</div>
   <textarea id="j-message" placeholder="e.g. will not be able to attend the marriage"></textarea>
 </div>
 <div class="timer" id="j-timer">00:00</div>
-<button class="call-btn jessica-btn" id="j-call-btn" onclick="jessicaCall()">&#128222; Call Now</button>
+<button class="call-btn j" id="j-btn" onclick="jCall()">&#128222; Call Now</button>
 <div class="status" id="j-status"></div>
-<div class="logs-header">
-  <div class="logs-title">&#128222; Call History</div>
-  <button class="refresh-btn" onclick="loadLogs()">&#8635; Refresh</button>
+<div class="logs-hdr">
+  <div class="logs-ttl">&#128222; Call History</div>
+  <button class="refresh" onclick="loadLogs()">&#8635; Refresh</button>
 </div>
 <div id="logs-container"><div style="color:#555;font-size:13px;text-align:center;padding:16px;">No calls yet.</div></div>
 </div>
 
-<!-- BUNTY PANEL -->
-<div class="panel" id="panel-bunty">
+<!-- BUNTY -->
+<div class="panel" id="panel-b">
 <div class="header">
   <div class="avatar bunty">&#128293;</div>
   <h2>Bunty</h2>
@@ -439,556 +714,118 @@ textarea{min-height:80px;resize:vertical;}
 <div class="card">
   <div class="label">Call Type</div>
   <div class="toggle-row">
-    <div class="toggle-btn bunty-selected" id="b-btn-checkin" onclick="bSelectType('checkin')">&#128075; Haal-chaal</div>
-    <div class="toggle-btn" id="b-btn-plan" onclick="bSelectType('plan')">&#128197; Milna</div>
-    <div class="toggle-btn" id="b-btn-message" onclick="bSelectType('message')">&#128140; Message</div>
+    <div class="toggle-btn bunty-sel" id="b-t-checkin" onclick="bType('checkin')">&#128075; Haal-chaal</div>
+    <div class="toggle-btn" id="b-t-plan" onclick="bType('plan')">&#128197; Milna</div>
+    <div class="toggle-btn" id="b-t-message" onclick="bType('message')">&#128140; Message</div>
   </div>
 </div>
-<div class="card" id="b-plan-fields" style="display:none;">
-  <div class="label">Time</div>
-  <input type="text" id="b-time" placeholder="e.g. kal shaam 6 baje" style="margin-bottom:10px;">
-  <div class="label" style="margin-top:4px;">Jagah</div>
-  <input type="text" id="b-place" placeholder="e.g. Tapri, C-scheme">
+<div class="card" id="b-plan" style="display:none;">
+  <div class="label">Time</div><input type="text" id="b-time" placeholder="e.g. kal shaam 6 baje" style="margin-bottom:10px;">
+  <div class="label" style="margin-top:4px;">Jagah</div><input type="text" id="b-place" placeholder="e.g. Tapri, C-scheme">
 </div>
-<div class="card" id="b-message-fields" style="display:none;">
+<div class="card" id="b-msg" style="display:none;">
   <div class="label">Message</div>
   <textarea id="b-message" placeholder="e.g. shaadi mein nahi aa payega"></textarea>
 </div>
 <div class="timer" id="b-timer">00:00</div>
-<button class="call-btn bunty-btn" id="b-call-btn" onclick="buntyCall()">&#128222; Call Maar</button>
+<button class="call-btn b" id="b-btn" onclick="bCall()">&#128222; Call Maar</button>
 <div class="status" id="b-status"></div>
 </div>
 
 <script>
-var jCallType = 'checkin';
-var bCallType = 'checkin';
-var timerInterval = null;
-var timerSeconds = 0;
+var jt='checkin', bt='checkin', timerInt=null, timerSec=0;
 
-function switchTab(tab) {
-  document.getElementById('tab-jessica').classList.toggle('active', tab==='jessica');
-  document.getElementById('tab-bunty').classList.toggle('active', tab==='bunty');
-  document.getElementById('panel-jessica').classList.toggle('active', tab==='jessica');
-  document.getElementById('panel-bunty').classList.toggle('active', tab==='bunty');
+function switchTab(t){
+  ['j','b'].forEach(function(x){
+    document.getElementById('tab-'+x).classList.toggle('active',x===t);
+    document.getElementById('panel-'+x).classList.toggle('active',x===t);
+  });
+}
+function jType(t){
+  jt=t;
+  ['checkin','plan','message'].forEach(function(x){ document.getElementById('j-t-'+x).classList.toggle('selected',t===x); });
+  document.getElementById('j-plan').style.display=t==='plan'?'block':'none';
+  document.getElementById('j-msg').style.display=t==='message'?'block':'none';
+}
+function bType(t){
+  bt=t;
+  ['checkin','plan','message'].forEach(function(x){ document.getElementById('b-t-'+x).classList.toggle('bunty-sel',t===x); });
+  document.getElementById('b-plan').style.display=t==='plan'?'block':'none';
+  document.getElementById('b-msg').style.display=t==='message'?'block':'none';
+}
+function startTimer(p){ timerSec=0; var el=document.getElementById(p+'-timer'); el.style.display='block'; timerInt=setInterval(function(){ timerSec++; var m=Math.floor(timerSec/60).toString().padStart(2,'0'); var s=(timerSec%60).toString().padStart(2,'0'); el.textContent=m+':'+s; },1000); }
+function stopTimer(p){ if(timerInt)clearInterval(timerInt); document.getElementById(p+'-timer').style.display='none'; }
+function showSt(id,msg,type){ var el=document.getElementById(id); el.textContent=msg; el.className='status '+type; el.style.display='block'; setTimeout(function(){el.style.display='none';},5000); }
+
+async function makeCall(bot, callType, phone, name, extra) {
+  if(!phone.startsWith('+')) phone='+91'+phone.replace(/^0/,'');
+  var body={to:phone,call_type:callType,friend_name:name,bot:bot};
+  Object.assign(body,extra);
+  var prefix=bot==='bunty'?'b':'j';
+  var btn=document.getElementById(prefix+'-btn');
+  btn.disabled=true; btn.textContent='Calling...';
+  try{
+    var res=await fetch('/call/outbound',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    var data=await res.json();
+    if(res.ok){ showSt(prefix+'-status','Calling '+name+'...\u2705','success'); startTimer(prefix); btn.textContent='On Call...'; }
+    else{ showSt(prefix+'-status',data.error||'Failed.','error'); btn.disabled=false; btn.textContent=bot==='bunty'?'\u260e Call Maar':'\u260e Call Now'; }
+  }catch(e){ showSt(prefix+'-status','Network error.','error'); btn.disabled=false; btn.textContent=bot==='bunty'?'\u260e Call Maar':'\u260e Call Now'; }
 }
 
-function jSelectType(t) {
-  jCallType = t;
-  ['checkin','plan','message'].forEach(function(x){ document.getElementById('j-btn-'+x).classList.toggle('selected', t===x); });
-  document.getElementById('j-plan-fields').style.display = t==='plan' ? 'block' : 'none';
-  document.getElementById('j-message-fields').style.display = t==='message' ? 'block' : 'none';
+async function jCall(){
+  var name=document.getElementById('j-name').value.trim();
+  var phone=document.getElementById('j-phone').value.trim();
+  if(!name||!phone){ showSt('j-status','Enter name and number.','error'); return; }
+  var extra={};
+  if(jt==='plan'){ var t=document.getElementById('j-time').value.trim(); var p=document.getElementById('j-place').value.trim(); if(!t||!p){showSt('j-status','Enter time and place.','error');return;} extra={time:t,place:p}; }
+  if(jt==='message'){ var m=document.getElementById('j-message').value.trim(); if(!m){showSt('j-status','Enter a message.','error');return;} extra={message:m}; }
+  makeCall('jessica',jt,phone,name,extra);
+}
+async function bCall(){
+  var name=document.getElementById('b-name').value.trim();
+  var phone=document.getElementById('b-phone').value.trim();
+  if(!name||!phone){ showSt('b-status','Naam aur number daalo.','error'); return; }
+  var extra={};
+  if(bt==='plan'){ var t=document.getElementById('b-time').value.trim(); var p=document.getElementById('b-place').value.trim(); if(!t||!p){showSt('b-status','Time aur jagah daalo.','error');return;} extra={time:t,place:p}; }
+  if(bt==='message'){ var m=document.getElementById('b-message').value.trim(); if(!m){showSt('b-status','Message daalo.','error');return;} extra={message:m}; }
+  makeCall('bunty',bt,phone,name,extra);
 }
 
-function bSelectType(t) {
-  bCallType = t;
-  ['checkin','plan','message'].forEach(function(x){ document.getElementById('b-btn-'+x).classList.toggle('bunty-selected', t===x); });
-  document.getElementById('b-plan-fields').style.display = t==='plan' ? 'block' : 'none';
-  document.getElementById('b-message-fields').style.display = t==='message' ? 'block' : 'none';
-}
-
-function startTimer(prefix) {
-  timerSeconds = 0;
-  var el = document.getElementById(prefix+'-timer');
-  el.style.display = 'block';
-  timerInterval = setInterval(function() {
-    timerSeconds++;
-    var m = Math.floor(timerSeconds/60).toString().padStart(2,'0');
-    var s = (timerSeconds%60).toString().padStart(2,'0');
-    el.textContent = m+':'+s;
-  }, 1000);
-}
-
-function stopTimer(prefix) {
-  if (timerInterval) clearInterval(timerInterval);
-  document.getElementById(prefix+'-timer').style.display = 'none';
-}
-
-async function jessicaCall() {
-  var phone = document.getElementById('j-phone').value.trim();
-  var fname = document.getElementById('j-name').value.trim();
-  if (!fname) { showStatus('j-status', 'Enter a name.', 'error'); return; }
-  if (!phone) { showStatus('j-status', 'Enter a phone number.', 'error'); return; }
-  if (!phone.startsWith('+')) phone = '+91' + phone.replace(/^0/,'');
-  if (jCallType==='plan') {
-    if (!document.getElementById('j-time').value.trim() || !document.getElementById('j-place').value.trim()) {
-      showStatus('j-status', 'Enter time and place.', 'error'); return;
-    }
-  }
-  if (jCallType==='message' && !document.getElementById('j-message').value.trim()) {
-    showStatus('j-status', 'Enter a message.', 'error'); return;
-  }
-  var btn = document.getElementById('j-call-btn');
-  btn.disabled = true; btn.textContent = 'Calling...';
-  var body = { to: phone, call_type: jCallType, friend_name: fname, bot: 'jessica' };
-  if (jCallType==='plan') { body.time=document.getElementById('j-time').value.trim(); body.place=document.getElementById('j-place').value.trim(); }
-  if (jCallType==='message') { body.message=document.getElementById('j-message').value.trim(); }
-  try {
-    var res = await fetch('/call/outbound', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
-    var data = await res.json();
-    if (res.ok) { showStatus('j-status', 'Jessica is calling '+fname+'...', 'success'); startTimer('j'); btn.textContent = 'On Call...'; }
-    else { showStatus('j-status', data.error||'Call failed.', 'error'); btn.disabled=false; btn.textContent='\u260e Call Now'; }
-  } catch(e) { showStatus('j-status', 'Network error.', 'error'); btn.disabled=false; btn.textContent='\u260e Call Now'; }
-}
-
-async function buntyCall() {
-  var phone = document.getElementById('b-phone').value.trim();
-  var fname = document.getElementById('b-name').value.trim();
-  if (!fname) { showStatus('b-status', 'Naam daalo.', 'error'); return; }
-  if (!phone) { showStatus('b-status', 'Number daalo.', 'error'); return; }
-  if (!phone.startsWith('+')) phone = '+91' + phone.replace(/^0/,'');
-  if (bCallType==='plan') {
-    if (!document.getElementById('b-time').value.trim() || !document.getElementById('b-place').value.trim()) {
-      showStatus('b-status', 'Time aur jagah daalo.', 'error'); return;
-    }
-  }
-  if (bCallType==='message' && !document.getElementById('b-message').value.trim()) {
-    showStatus('b-status', 'Message daalo.', 'error'); return;
-  }
-  var btn = document.getElementById('b-call-btn');
-  btn.disabled = true; btn.textContent = 'Call ho raha hai...';
-  var body = { to: phone, call_type: bCallType, friend_name: fname, bot: 'bunty' };
-  if (bCallType==='plan') { body.time=document.getElementById('b-time').value.trim(); body.place=document.getElementById('b-place').value.trim(); }
-  if (bCallType==='message') { body.message=document.getElementById('b-message').value.trim(); }
-  try {
-    var res = await fetch('/call/outbound', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
-    var data = await res.json();
-    if (res.ok) { showStatus('b-status', 'Bunty call maar raha hai '+fname+' ko...', 'success'); startTimer('b'); btn.textContent = 'Call pe hai...'; }
-    else { showStatus('b-status', data.error||'Call fail ho gaya.', 'error'); btn.disabled=false; btn.textContent='\u260e Call Maar'; }
-  } catch(e) { showStatus('b-status', 'Network error.', 'error'); btn.disabled=false; btn.textContent='\u260e Call Maar'; }
-}
-
-function showStatus(id, msg, type) {
-  var el = document.getElementById(id);
-  el.textContent = msg; el.className = 'status '+type; el.style.display = 'block';
-  setTimeout(function(){ el.style.display='none'; }, 5000);
-}
-
-function loadLogs() {
-  fetch('/jessica/logs').then(function(r){ return r.json(); }).then(function(logs) {
-    var c = document.getElementById('logs-container');
-    if (!logs||!logs.length) { c.innerHTML='<div style="color:#555;font-size:13px;text-align:center;padding:16px;">No calls yet.</div>'; return; }
-    c.innerHTML = logs.map(function(log) {
-      var botLabel = log.bot==='bunty' ? '&#128293; Bunty' : '&#128198; Jessica';
-      var badge = log.call_type==='plan' ? '&#128197; Plan' : log.call_type==='message' ? '&#128140; Msg' : '&#128075; Check-in';
-      var details = log.call_type==='plan' ? '<div style="font-size:11px;color:#888;margin:4px 0;">'+log.place+' &bull; '+log.time_proposed+'</div>' : '';
-      var tr = log.transcript&&log.transcript.length ? '<div class="transcript" id="tr-'+log.call_sid+'" style="display:none">'+log.transcript.map(function(l){ var p=l.split(': '); return '<div class="tr-line"><span class="tr-role">'+p[0]+':</span> '+p.slice(1).join(': ')+'</div>'; }).join('')+'</div>' : '';
-      var audio = log.recording_url ? '<audio controls style="width:100%;margin-top:8px;border-radius:8px;" src="'+log.recording_url+'"></audio>' : '<div style="font-size:11px;color:#555;margin-top:5px;">Recording processing...</div>';
-      return '<div class="log-card"><div class="log-top"><div><div class="log-name">'+log.friend_name+' <span style="font-size:11px;color:#666;">'+botLabel+'</span></div><div class="log-meta">'+badge+' &bull; '+log.timestamp+' &bull; '+log.duration+'s</div></div><div class="log-status '+( log.status==='completed'?'ok':'na')+'">'+log.status+'</div></div>'+details+'<button class="tr-toggle" onclick="toggleTr(\\''+log.call_sid+'\\')">&#128172; Transcript</button>'+tr+audio+'</div>';
+function loadLogs(){
+  fetch('/jessica/logs').then(function(r){return r.json();}).then(function(logs){
+    var c=document.getElementById('logs-container');
+    if(!logs||!logs.length){c.innerHTML='<div style="color:#555;font-size:13px;text-align:center;padding:16px;">No calls yet.</div>';return;}
+    c.innerHTML=logs.map(function(log){
+      var bl=log.bot==='bunty'?'&#128293; Bunty':'&#128198; Jessica';
+      var badge=log.call_type==='plan'?'&#128197; Plan':log.call_type==='message'?'&#128140; Msg':'&#128075; Check-in';
+      var tr=log.transcript&&log.transcript.length?'<div class="transcript" id="tr-'+log.call_sid+'" style="display:none">'+log.transcript.map(function(l){var p=l.split(': ');return '<div class="tr-line"><span class="tr-who">'+p[0]+':</span> '+p.slice(1).join(': ')+'</div>';}).join('')+'</div>':'';
+      return '<div class="log-card"><div class="log-top"><div><div class="log-name">'+log.friend_name+' <span style="font-size:11px;color:#666;">'+bl+'</span></div><div class="log-meta">'+badge+' &bull; '+log.timestamp+' &bull; '+log.duration+'s</div></div><div class="log-badge '+( log.status==='completed'?'ok':'na')+'">'+log.status+'</div></div><button class="tr-btn" onclick="toggleTr(\''+log.call_sid+'\')">&#128172; Transcript</button>'+tr+'</div>';
     }).join('');
   }).catch(function(){});
 }
-function toggleTr(sid) { var el=document.getElementById('tr-'+sid); if(el) el.style.display=el.style.display==='none'?'block':'none'; }
+function toggleTr(sid){var el=document.getElementById('tr-'+sid);if(el)el.style.display=el.style.display==='none'?'block':'none';}
 loadLogs();
 </script>
 </body>
 </html>"""
-        return Response(html, mimetype='text/html')
-
-    return Response('Not found', status=404)
-
-    login_html = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Pooja</title>
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    background: #0a0a0f; color: #e8e8f0;
-    min-height: 100vh;
-    display: flex; align-items: center; justify-content: center;
-    padding: 20px;
-  }
-  .box {
-    width: 100%; max-width: 340px;
-    background: #13131a;
-    border: 1px solid #1e1e2e;
-    border-radius: 20px;
-    padding: 36px 28px;
-    text-align: center;
-  }
-  .avatar {
-    width: 64px; height: 64px;
-    background: linear-gradient(135deg, #7c3aed, #db2777);
-    border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 28px;
-    margin: 0 auto 16px;
-    box-shadow: 0 0 24px rgba(124,58,237,0.4);
-  }
-  h1 { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
-  p { font-size: 13px; color: #666; margin-bottom: 28px; }
-  input {
-    width: 100%;
-    background: #1a1a26;
-    border: 1px solid #1e1e2e;
-    border-radius: 10px;
-    padding: 13px 16px;
-    color: #e8e8f0;
-    font-size: 15px;
-    outline: none;
-    margin-bottom: 14px;
-    text-align: center;
-    letter-spacing: 3px;
-  }
-  input:focus { border-color: #7c3aed; }
-  button {
-    width: 100%; padding: 14px;
-    border-radius: 12px; border: none;
-    background: linear-gradient(135deg, #7c3aed, #db2777);
-    color: white; font-size: 15px; font-weight: 700; cursor: pointer;
-  }
-  .error { color: #f87171; font-size: 13px; margin-top: 12px; }
-</style>
-</head>
-<body>
-<div class="box">
-  <div class="avatar">&#128188;</div>
-  <h1>Pooja</h1>
-  <p>Mr. Ravi's Personal Assistant</p>
-  <form method="POST">
-    <input type="password" name="password" placeholder="Password" autofocus>
-    <button type="submit">Enter</button>
-  </form>
-  ERROR_PLACEHOLDER
-</div>
-</body>
-</html>"""
-    if error:
-        login_html = login_html.replace('ERROR_PLACEHOLDER', f'<div class="error">{error}</div>')
-    else:
-        login_html = login_html.replace('ERROR_PLACEHOLDER', '')
-    return Response(login_html, mimetype='text/html')
+    return Response(html, mimetype='text/html')
 
 # ============================================================
-# OUTBOUND CALL — TRIGGER
-# ============================================================
-@app.route('/call/outbound', methods=['POST'])
-def outbound_call():
-    data        = request.get_json(force=True) or {}
-    to          = data.get('to', '').strip()
-    call_type   = data.get('call_type', 'checkin')
-    time        = data.get('time', '').strip()
-    place       = data.get('place', '').strip()
-    friend_name = data.get('friend_name', '').strip() or to
-    friend_name = data.get('friend_name', '').strip() or to
-    message     = data.get('message', '').strip()
-    bot         = data.get('bot', 'jessica')
-    if not to:
-        return {"error": "to is required"}, 400
-    if call_type == 'plan' and (not time or not place):
-        return {"error": "time and place required for plan call"}, 400
-    if call_type == 'message' and not message:
-        return {"error": "message is required for message delivery call"}, 400
-
-    print(f"\n📤 Outbound [{call_type}] → {friend_name} ({to}) | Time: {time} | Place: {place}")
-
-    try:
-        twilio = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        base   = os.getenv('BASE_URL', 'https://callbot-production-a211.up.railway.app')
-        params = urllib.parse.urlencode({'call_type': call_type, 'time': time, 'place': place, 'friend_name': friend_name, 'message': message, 'bot': bot})
-        call   = twilio.calls.create(
-            to=to,
-            from_=TWILIO_PHONE_NUMBER,
-            url=f"{base}/call/outbound/start?{params}",
-            status_callback=f"{base}/call/status",
-            status_callback_method='POST',
-            record=True
-        )
-        print(f"  ✅ SID: {call.sid}")
-        return {"status": "calling", "sid": call.sid}, 200
-    except Exception as e:
-        print(f"  ❌ {e}")
-        return {"error": str(e)}, 500
-
-# ============================================================
-# OUTBOUND — START (friend picks up)
-# ============================================================
-@app.route('/call/outbound/start', methods=['POST'])
-def outbound_start():
-    call_sid     = request.form.get('CallSid', '')
-    call_type    = request.args.get('call_type', 'checkin')
-    time         = request.args.get('time', 'soon')
-    place        = request.args.get('place', 'the usual spot')
-    friend_name  = request.args.get('friend_name', 'Friend')
-    friend_name  = request.args.get('friend_name', 'Friend')
-    message      = request.args.get('message', '')
-    bot          = request.args.get('bot', 'jessica')
-    print(f"\n🤝 Picked up | SID: {call_sid} | {friend_name} | Type: {call_type}")
-
-    with call_lock:
-        call_history[call_sid] = []
-        call_meta[call_sid]    = {'type': call_type, 'time': time, 'place': place, 'friend_name': friend_name, 'message': message, 'bot': bot, 'language': 'english'}
-
-    if bot == 'bunty':
-        if call_type == 'plan':
-            opening = f"Oye {friend_name} bhai, Bunty bol raha hoon. Abe sun, Ravi pooch raha tha ki {time} ko {place} pe milna ho sakta hai kya?"
-        elif call_type == 'message':
-            opening = f"Oye {friend_name} bhai, Bunty bol raha hoon, Ravi ki taraf se ek baat pohnchaani thi."
-        else:
-            opening = f"Oye {friend_name} bhai, Bunty bol raha hoon. Ravi ne bola tha tera haal-chaal poochhun. Kya scene hai tera?"
-    else:
-        name_part = f"Hello, is this {friend_name}? " if friend_name and not friend_name.startswith('+') and not friend_name.isdigit() else "Hello! "
-        if call_type == 'plan':
-            opening = name_part + f"This is Jessica, personal assistant to Mr. Ravi Yadav. I was wondering if you are available to meet him at {place} around {time}?"
-        elif call_type == 'message':
-            opening = name_part + "This is Jessica, personal assistant to Mr. Ravi Yadav. I am calling to pass on a message from him."
-        else:
-            opening = name_part + "This is Jessica, personal assistant to Mr. Ravi Yadav. He wanted me to check in on you and see how you have been doing."
-    response = VoiceResponse()
-    voice_id = HINDI_VOICE_ID if bot == 'bunty' else JESSICA_VOICE_ID
-    fallback = 'hi-IN' if bot == 'bunty' else 'en-US'
-    play_audio_or_say(response, opening, voice_id=voice_id, fallback_lang=fallback)
-
-    with call_lock:
-        call_history[call_sid].append({"role": "assistant", "content": opening})
-
-    gather = Gather(
-        input='speech',
-        action='/call/outbound/respond',
-        method='POST',
-        speech_timeout=3,
-        language='hi-IN',
-        speech_model='phone_call'
-    )
-    response.append(gather)
-    response.redirect('/call/outbound/start?' + request.query_string.decode())
-    return str(response)
-
-# ============================================================
-# OUTBOUND — RESPOND (Pooja continues conversation)
-# ============================================================
-@app.route('/call/outbound/respond', methods=['POST'])
-def outbound_respond():
-    friend_text = request.form.get('SpeechResult', '').strip()
-    call_sid    = request.form.get('CallSid', '')
-    print(f"  \U0001f442 Friend said: {friend_text}")
-    response = VoiceResponse()
-    if not friend_text:
-        gather = Gather(input='speech', action='/call/outbound/respond',
-                        method='POST', speech_timeout=3, language='hi-IN', speech_model='phone_call')
-        response.say("Sorry, I didn't catch that. Could you say that again?", voice='alice', language='hi-IN')
-        response.append(gather)
-        return str(response)
-    reply = get_pooja_reply(call_sid, friend_text)
-    print(f"  \U0001f4ac Pooja: {reply}")
-    end_call    = '[END_CALL]' in reply
-    clean_reply = reply.replace('[END_CALL]', '').strip()
-
-
-    with call_lock:
-        resp_bot = call_meta.get(call_sid, {}).get('bot', 'jessica')
-    resp_voice    = HINDI_VOICE_ID if resp_bot == 'bunty' else JESSICA_VOICE_ID
-    resp_fallback = 'hi-IN' if resp_bot == 'bunty' else 'en-US'
-    play_audio_or_say(response, clean_reply, voice_id=resp_voice, fallback_lang=resp_fallback)
-    if end_call:
-        print(f"  \u2705 Pooja hanging up")
-        response.hangup()
-    else:
-        gather = Gather(input='speech', action='/call/outbound/respond',
-                        method='POST', speech_timeout=3, language='hi-IN', speech_model='phone_call')
-        response.append(gather)
-    return str(response)
-
-# ============================================================
-# INCOMING CALL — SARCASTIC BOT
-# ============================================================
-@app.route('/call/incoming', methods=['POST'])
-def incoming_call():
-    caller   = request.form.get('From', '')
-    call_sid = request.form.get('CallSid', '')
-    print(f"\n\U0001f4de Incoming call from {caller} | SID: {call_sid}")
-    response = VoiceResponse()
-    if any(caller.endswith(b.replace('+91','').replace('+','')) for b in BLOCKED_NUMBERS if b):
-        response.say("Hello, please leave a message.", voice='alice', language='en-IN')
-        response.hangup()
-        return str(response)
-    with call_lock:
-        call_history[call_sid] = []
-    is_indian = caller.startswith('+91') or caller.startswith('0091')
-    lang = 'hi-IN' if is_indian else 'en-US'
-    gather = Gather(input='speech', action=f'/call/respond?detected_lang={lang}',
-                    method='POST', speech_timeout=2, language=lang, speech_model='phone_call')
-    gather.say("Bol." if is_indian else "Yeah?", voice='alice',
-               language='hi-IN' if is_indian else 'en-US')
-    response.append(gather)
-    response.redirect('/call/incoming')
-    return str(response)
-
-# ============================================================
-# INCOMING — RESPOND
-# ============================================================
-@app.route('/call/respond', methods=['POST'])
-def respond():
-    caller_text = request.form.get('SpeechResult', '').strip()
-    call_sid    = request.form.get('CallSid', '')
-    twilio_lang = request.form.get('Language', request.args.get('detected_lang', 'hi-IN'))
-    language    = 'english' if twilio_lang.lower().startswith('en') else 'hindi'
-    print(f"  \U0001f442 Caller said: {caller_text} | Lang: {language}")
-    response = VoiceResponse()
-    if not caller_text:
-        gather = Gather(input='speech', action=f'/call/respond?detected_lang={twilio_lang}',
-                        method='POST', speech_timeout=2, language=twilio_lang, speech_model='phone_call')
-        gather.say("Kya bola? Suna nahi." if language=='hindi' else "Didn't catch that mate.",
-                   voice='alice', language='hi-IN' if language=='hindi' else 'en-AU')
-        response.append(gather)
-        return str(response)
-    reply = get_sarcastic_reply(call_sid, caller_text, language)
-    print(f"  \U0001f916 Bot: {reply}")
-    play_audio_or_say(response, reply, language=language,
-                      fallback_lang='hi-IN' if language=='hindi' else 'en-AU')
-    gather = Gather(input='speech', action=f'/call/respond?detected_lang={twilio_lang}',
-                    method='POST', speech_timeout=2, language=twilio_lang, speech_model='phone_call')
-    response.append(gather)
-    return str(response)
-
-# ============================================================
-# CALL STATUS — CLEANUP + SAVE LOG
-# ============================================================
-@app.route('/call/status', methods=['POST'])
-def call_status():
-    call_sid = request.form.get('CallSid', '')
-    status   = request.form.get('CallStatus', '')
-    duration = request.form.get('CallDuration', '0')
-    print(f"\n\U0001f4f5 {call_sid} ended | {status} | {duration}s")
-
-    with call_lock:
-        meta    = call_meta.get(call_sid, {})
-        history = call_history.get(call_sid, [])
-
-    # Only log Pooja outbound calls
-    if meta.get('type') in ('plan', 'checkin'):
-        # Build transcript
-        transcript = []
-        for msg in history:
-            role    = 'Jessica' if msg['role'] == 'assistant' else 'Friend'
-            transcript.append(f"{role}: {msg['content']}")
-
-        # Fetch recording URL from Twilio (may take a few seconds to be available)
-        recording_url = None
-        try:
-            twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-            recordings    = twilio_client.recordings.list(call_sid=call_sid, limit=1)
-            if recordings:
-                rec = recordings[0]
-                recording_url = f"/recording/{rec.sid}"
-        except Exception as e:
-            print(f"  Recording fetch error: {e}")
-
-        log_entry = {
-            'call_sid':      call_sid,
-            'friend_name':   meta.get('friend_name', 'Unknown'),
-            'bot':           meta.get('bot', 'jessica'),
-            'call_type':     meta.get('type', 'checkin'),
-            'time_proposed': meta.get('time', ''),
-            'place':         meta.get('place', ''),
-            'duration':      duration,
-            'status':        status,
-            'timestamp':     datetime.datetime.now().strftime('%d %b %Y, %I:%M %p'),
-            'transcript':    transcript,
-            'recording_url': recording_url,
-        }
-        with call_lock:
-            call_logs.insert(0, log_entry)
-            # Keep last 50 logs
-            if len(call_logs) > 50:
-                call_logs.pop()
-
-    with call_lock:
-        call_history.pop(call_sid, None)
-        call_meta.pop(call_sid, None)
-    return '', 200
-
-
-# ============================================================
-# LOGS API — for UI polling
-# ============================================================
-@app.route('/jessica/logs', methods=['GET'])
-def get_logs():
-    with call_lock:
-        logs = list(call_logs)
-    return json.dumps(logs), 200, {'Content-Type': 'application/json'}
-
-
-
-# ============================================================
-# HINDI MALE ABUSIVE OUTBOUND BOT — BUNTY
-# ============================================================
-def get_bunty_prompt(call_type, time='', place='', message=''):
-    if call_type == 'plan':
-        return f"""Tu Bunty hai, Ravi ka khaas banda. Tu outbound call kar raha hai apne yaar ko milne ka plan fix karne ke liye.
-GOAL: Confirm kar ki yaar {place} pe {time} ko Ravi se milne ke liye free hai.
-RULES:
-- Haryanvi/Hindi mein baat kar — bilkul natural, jaise real dost hote hain
-- Short rakho — 1-3 sentences
-- Gaaliyan aur slangs zaroor use kar: bhai, yaar, abe, saale, bc, oye, chal
-- Warm aur friendly raho lekin abusive bhi — jaise close dost hote hain
-- Agar yaar agree kare → confirm karo aur wrap up karo
-- Agar alag time/place bole → acknowledge karo, confirm karo
-- Plan confirm hone pe exactly likho: [END_CALL]
-Opening: "Oye {'{friend_name}'} bhai, Ravi ka yaar Bunty bol raha hoon. Abe sun, Ravi pooch raha tha ki {time} ko {place} pe milna ho sakta hai kya?"
-"""
-    elif call_type == 'message':
-        return f"""Tu Bunty hai, Ravi ka khaas banda. Tu ek message deliver karne ke liye call kar raha hai.
-MESSAGE: {message}
-RULES:
-- Haryanvi/Hindi mein baat kar
-- Message ko naturally aur warmly deliver kar — elaborate karo thoda
-- Phir poochho: "Koi message hai Ravi ke liye?"
-- Unka reply acknowledge karo aur wrap up karo
-- End pe exactly likho: [END_CALL]
-Opening: "Oye {'{friend_name}'} bhai, Bunty bol raha hoon, Ravi ki taraf se call hai."
-"""
-    else:  # checkin
-        return """Tu Bunty hai, Ravi ka khaas banda. Tu check-in call kar raha hai.
-GOAL: Casually poochho kaisa hai, kya chal raha hai.
-RULES:
-- Haryanvi/Hindi mein baat kar — bilkul natural
-- Short rakho — 1-3 sentences
-- Gaaliyan aur slangs use kar warmly
-- Genuinely interested raho
-- 3-4 exchanges ke baad naturally wrap up karo
-- End pe exactly likho: [END_CALL]
-Opening: "Oye bhai, Bunty bol raha hoon. Ravi ne bola tha tera haal-chaal poochhun. Kya scene hai tera?"
-"""
-
-# ============================================================
-# RECORDING PROXY
-# ============================================================
-@app.route('/recording/<recording_sid>', methods=['GET'])
-def serve_recording(recording_sid):
-    try:
-        from requests.auth import HTTPBasicAuth
-        url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Recordings/{recording_sid}.mp3"
-        resp = requests.get(url, auth=HTTPBasicAuth(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN), stream=True)
-        if resp.status_code == 200:
-            return Response(resp.content, mimetype='audio/mpeg')
-        return "Not found", 404
-    except Exception as e:
-        return str(e), 500
-
-# ============================================================
-# HEALTH CHECK
+# HEALTH
 # ============================================================
 @app.route('/')
 def health():
-    return "\U0001f916 Sarcastic Call Bot + Pooja Assistant is RUNNING!", 200
+    return "🤖 Jessica + Bunty WebSocket Bot RUNNING!", 200
 
 # ============================================================
 # MAIN
 # ============================================================
 if __name__ == '__main__':
     print("=" * 60)
-    print("\U0001f680 Sarcastic Call Bot + Pooja Starting...")
-    print("=" * 60)
-    print(f"\U0001f4de Incoming calls:    POST /call/incoming")
-    print(f"\U0001f4e4 Pooja UI:          GET  /jessica")
-    print(f"\U0001f4e4 Pooja outbound:    POST /call/outbound")
-    print(f"\U0001f50a Audio serve:       GET  /audio/<filename>")
-    print(f"\U0001f511 UI Password:       {UI_PASSWORD}")
-    print(f"\U0001f3ad ElevenLabs: {'\u2705 Configured' if ELEVENLABS_API_KEY else '\u274c Not configured -- using Twilio TTS'}")
+    print("🚀 Jessica + Bunty WebSocket Bot Starting...")
+    print(f"📱 UI: /jessica")
+    print(f"📞 Outbound: POST /call/outbound")
+    print(f"🎙️ Media Stream: WS /media-stream")
     print("=" * 60)
     port = int(os.getenv('PORT', 5001))
     app.run(host='0.0.0.0', port=port, debug=False)

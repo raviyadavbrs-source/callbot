@@ -1,5 +1,9 @@
 flask
+flask-sock
 twilio
 anthropic
 requests
+websocket-client
+gevent
+gevent-websocket
 gunicorn
