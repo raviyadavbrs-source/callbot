@@ -3,7 +3,7 @@
 ║              WINSB2026 — SARCASTIC CALL BOT + POOJA ASSISTANT        ║
 ║                                                                      ║
 ║  Incoming call → Sarcastic bot answers                               ║
-║  /pooja → Mobile UI to trigger Pooja outbound calls                  ║
+║  /jessica → Mobile UI to trigger Pooja outbound calls                  ║
 ║  Plan Call  → Pooja fixes a meetup                                   ║
 ║  Check-in   → Pooja casually checks in on Ravi's behalf              ║
 ╚══════════════════════════════════════════════════════════════════════╝
@@ -32,6 +32,7 @@ TWILIO_AUTH_TOKEN   = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "+18085182186")
 ANTHROPIC_API_KEY   = os.getenv("ANTHROPIC_API_KEY")
 ELEVENLABS_API_KEY  = os.getenv("ELEVENLABS_API_KEY", "")
+DEEPGRAM_API_KEY    = os.getenv("DEEPGRAM_API_KEY", "d86f846652be259f234acad143a0f9d4e3027cba")
 UI_PASSWORD         = os.getenv("UI_PASSWORD", "ravi2026")
 
 # ============================================================
@@ -39,7 +40,7 @@ UI_PASSWORD         = os.getenv("UI_PASSWORD", "ravi2026")
 # ============================================================
 HINDI_VOICE_ID   = "ibbx9zDYGvLgtYzRbqqG"
 ENGLISH_VOICE_ID = "nwj0s2LU9bDWRKND5yzA"
-POOJA_VOICE_ID   = "EXAVITQu4vr4xnSDxMaL"   # Sarah — female US accent
+JESSICA_VOICE_ID   = "EXAVITQu4vr4xnSDxMaL"   # Jessica — female US accent (Sarah)
 
 # ============================================================
 # CONTACTS
@@ -113,7 +114,7 @@ RULES:
 - If friend ABUSES → sharp professional reply. E.g. "I beg your pardon? I am simply coordinating on Mr. Ravi's behalf."
 - Once plan confirmed → warm goodbye and end with exactly: [END_CALL]
 
-Opening: "Hello, this is Pooja calling on behalf of Mr. Ravi. I was wondering if you are available to meet him at {place} around {time}?"
+Opening: "Hello, this is Jessica calling on behalf of Mr. Ravi. I was wondering if you are available to meet him at {place} around {time}?"
 """
 
 def get_pooja_checkin_prompt(language='english'):
@@ -126,7 +127,7 @@ RULES:
 - Always reply in English only — warm, friendly, conversational
 - Short responses — 1-3 sentences
 - No emojis or special characters
-- Opening: "Hello, this is Pooja calling on behalf of Mr. Ravi. He wanted me to check in on you and see how you have been doing."
+- Opening: "Hello, this is Jessica calling on behalf of Mr. Ravi. He wanted me to check in on you and see how you have been doing."
 - Be genuinely interested — ask follow-up questions
 - Keep it light and positive
 - After 3-4 exchanges wrap up naturally
@@ -134,6 +135,41 @@ RULES:
 - When ready to end, finish with exactly: [END_CALL]
 """
 
+
+
+# ============================================================
+# DEEPGRAM TRANSCRIPTION
+# ============================================================
+def transcribe_with_deepgram(audio_url):
+    """Transcribe audio URL using Deepgram — fast Hindi/English recognition."""
+    try:
+        headers = {
+            "Authorization": f"Token {DEEPGRAM_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "url": audio_url
+        }
+        params = {
+            "model": "nova-2",
+            "language": "hi",
+            "smart_format": True,
+            "punctuate": True
+        }
+        resp = requests.post(
+            "https://api.deepgram.com/v1/listen",
+            headers=headers,
+            json=payload,
+            params=params,
+            timeout=10
+        )
+        if resp.status_code == 200:
+            result = resp.json()
+            transcript = result["results"]["channels"][0]["alternatives"][0]["transcript"]
+            return transcript.strip()
+    except Exception as e:
+        print(f"Deepgram error: {e}")
+    return ""
 
 # ============================================================
 # LANGUAGE DETECTION
@@ -190,17 +226,21 @@ def get_pooja_reply(call_sid, friend_text):
         history = call_history[call_sid].copy()
 
     call_type = meta.get('type', 'checkin')
+    bot       = meta.get('bot', 'jessica')
     language  = detect_language(friend_text)
 
-    # Update language in meta so TTS uses correct voice
+    # Update language in meta
     with call_lock:
         call_meta[call_sid]['language'] = language
 
-    if call_type == 'plan':
+    if bot == 'bunty':
+        system = get_bunty_prompt(call_type, meta.get('time',''), meta.get('place',''), meta.get('message',''))
+    elif call_type == 'plan':
         system = get_pooja_plan_prompt(meta.get('time', 'soon'), meta.get('place', 'the usual spot'), language)
+    elif call_type == 'message':
+        system = get_pooja_message_prompt(meta.get('message', ''))
     else:
         system = get_pooja_checkin_prompt(language)
-
     history.append({"role": "user", "content": friend_text})
     try:
         resp = client.messages.create(
@@ -233,7 +273,7 @@ def text_to_speech(text, voice_id=None, language='english'):
             f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
             json={
                 "text": text,
-                "model_id": "eleven_multilingual_v2",
+                "model_id": "eleven_flash_v2_5",
                 "voice_settings": {"stability": 0.5, "similarity_boost": 0.75,
                                    "style": 0.5, "use_speaker_boost": True}
             },
@@ -274,131 +314,262 @@ def serve_audio(filename):
 # ============================================================
 # POOJA MOBILE UI
 # ============================================================
-@app.route('/pooja', methods=['GET', 'POST'])
-def pooja_ui():
+@app.route('/jessica', methods=['GET', 'POST'])
+def jessica_ui():
     contacts_json = json.dumps(CONTACTS)
-    if True:  # no auth - URL is private
+    if True:
         html = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>Pooja</title>
+<title>Call Assistant</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0a0a0f;color:#e8e8f0;min-height:100vh;padding:20px 16px 40px;}
-.header{text-align:center;padding:24px 0 28px;}
-.avatar{width:64px;height:64px;background:linear-gradient(135deg,#7c3aed,#db2777);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:28px;margin:0 auto 12px;box-shadow:0 0 24px rgba(124,58,237,0.4);}
-h1{font-size:22px;font-weight:700;}
-.sub{font-size:13px;color:#888;margin-top:4px;}
-.card{background:#13131a;border:1px solid #1e1e2e;border-radius:16px;padding:20px;margin-bottom:16px;}
-.label{font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:#666;margin-bottom:10px;}
-input{width:100%;background:#1a1a26;border:1px solid #1e1e2e;border-radius:10px;padding:13px 14px;color:#e8e8f0;font-size:16px;outline:none;}
-input:focus{border-color:#7c3aed;}
-input::placeholder{color:#444;}
-.toggle-row{display:flex;gap:10px;}
-.toggle-btn{flex:1;padding:12px;border-radius:12px;border:2px solid #1e1e2e;background:#1a1a26;color:#888;font-size:13px;font-weight:600;cursor:pointer;text-align:center;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0a0a0f;color:#e8e8f0;min-height:100vh;padding:16px 16px 40px;}
+.tabs{display:flex;gap:0;margin-bottom:20px;background:#13131a;border-radius:14px;padding:4px;}
+.tab{flex:1;padding:11px;text-align:center;border-radius:10px;cursor:pointer;font-size:13px;font-weight:600;color:#666;transition:all 0.15s;}
+.tab.active{background:linear-gradient(135deg,#7c3aed,#db2777);color:white;}
+.panel{display:none;}
+.panel.active{display:block;}
+.header{text-align:center;padding:16px 0 20px;}
+.avatar{width:56px;height:56px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:24px;margin:0 auto 10px;}
+.avatar.jessica{background:linear-gradient(135deg,#7c3aed,#db2777);box-shadow:0 0 20px rgba(124,58,237,0.4);}
+.avatar.bunty{background:linear-gradient(135deg,#b45309,#dc2626);box-shadow:0 0 20px rgba(180,83,9,0.4);}
+h2{font-size:20px;font-weight:700;}
+.sub{font-size:12px;color:#888;margin-top:3px;}
+.card{background:#13131a;border:1px solid #1e1e2e;border-radius:14px;padding:16px;margin-bottom:12px;}
+.label{font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:#666;margin-bottom:8px;}
+input,textarea{width:100%;background:#1a1a26;border:1px solid #1e1e2e;border-radius:10px;padding:12px 14px;color:#e8e8f0;font-size:15px;outline:none;font-family:inherit;}
+input:focus,textarea:focus{border-color:#7c3aed;}
+input::placeholder,textarea::placeholder{color:#444;}
+textarea{min-height:80px;resize:vertical;}
+.toggle-row{display:flex;gap:8px;flex-wrap:wrap;}
+.toggle-btn{flex:1;min-width:80px;padding:10px 8px;border-radius:10px;border:2px solid #1e1e2e;background:#1a1a26;color:#888;font-size:12px;font-weight:600;cursor:pointer;text-align:center;}
 .toggle-btn.selected{border-color:#db2777;background:#1f0f1a;color:#f472b6;}
-.call-btn{width:100%;padding:16px;border-radius:14px;border:none;background:linear-gradient(135deg,#7c3aed,#db2777);color:white;font-size:16px;font-weight:700;cursor:pointer;margin-top:4px;box-shadow:0 4px 20px rgba(124,58,237,0.35);}
+.toggle-btn.bunty-selected{border-color:#dc2626;background:#1f0a0a;color:#f87171;}
+.call-btn{width:100%;padding:15px;border-radius:13px;border:none;color:white;font-size:15px;font-weight:700;cursor:pointer;margin-top:4px;}
+.call-btn.jessica-btn{background:linear-gradient(135deg,#7c3aed,#db2777);box-shadow:0 4px 18px rgba(124,58,237,0.35);}
+.call-btn.bunty-btn{background:linear-gradient(135deg,#b45309,#dc2626);box-shadow:0 4px 18px rgba(180,83,9,0.35);}
 .call-btn:disabled{opacity:0.4;}
-.status{text-align:center;padding:14px;border-radius:12px;font-size:14px;font-weight:500;margin-top:14px;display:none;}
+.status{text-align:center;padding:12px;border-radius:10px;font-size:13px;font-weight:500;margin-top:12px;display:none;}
 .status.success{background:#0d2010;color:#4ade80;border:1px solid #166534;}
 .status.error{background:#200d0d;color:#f87171;border:1px solid #7f1d1d;}
-#plan-fields{display:none;}
-.logs-title{font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:#666;margin-bottom:14px;margin-top:24px;}
-.log-card{background:#13131a;border:1px solid #1e1e2e;border-radius:14px;padding:16px;margin-bottom:12px;}
-.log-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;}
-.log-name{font-size:15px;font-weight:700;color:#e8e8f0;}
-.log-meta{font-size:11px;color:#555;margin-top:3px;}
+.timer{text-align:center;font-size:22px;font-weight:700;color:#a78bfa;padding:10px 0;display:none;}
+.log-card{background:#13131a;border:1px solid #1e1e2e;border-radius:13px;padding:14px;margin-bottom:10px;}
+.log-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:5px;}
+.log-name{font-size:14px;font-weight:700;}
+.log-meta{font-size:11px;color:#555;margin-top:2px;}
 .log-status{font-size:10px;font-weight:700;padding:3px 8px;border-radius:20px;text-transform:uppercase;}
 .log-status.ok{background:#0d2010;color:#4ade80;}
 .log-status.na{background:#1f0f0f;color:#f87171;}
-.tr-toggle{background:#1a1a26;border:1px solid #1e1e2e;border-radius:8px;color:#888;font-size:12px;padding:6px 12px;cursor:pointer;margin-top:8px;}
-.transcript{margin-top:10px;background:#0d0d14;border-radius:10px;padding:12px;max-height:200px;overflow-y:auto;}
-.tr-line{font-size:12px;color:#c8c8e0;margin-bottom:6px;line-height:1.5;}
+.tr-toggle{background:#1a1a26;border:1px solid #1e1e2e;border-radius:8px;color:#888;font-size:11px;padding:5px 10px;cursor:pointer;margin-top:7px;}
+.transcript{margin-top:8px;background:#0d0d14;border-radius:9px;padding:10px;max-height:180px;overflow-y:auto;}
+.tr-line{font-size:11px;color:#c8c8e0;margin-bottom:5px;line-height:1.5;}
 .tr-role{color:#a78bfa;font-weight:700;}
+.logs-header{display:flex;justify-content:space-between;align-items:center;margin-top:20px;margin-bottom:12px;}
+.logs-title{font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:#666;}
+.refresh-btn{background:#1a1a26;border:1px solid #1e1e2e;border-radius:8px;color:#a78bfa;font-size:11px;padding:5px 12px;cursor:pointer;}
 </style>
 </head>
 <body>
+<div class="tabs">
+  <div class="tab active" id="tab-jessica" onclick="switchTab('jessica')">&#128188; Jessica</div>
+  <div class="tab" id="tab-bunty" onclick="switchTab('bunty')">&#128293; Bunty</div>
+</div>
+
+<!-- JESSICA PANEL -->
+<div class="panel active" id="panel-jessica">
 <div class="header">
-  <div class="avatar">&#128188;</div>
-  <h1>Pooja</h1>
-  <p class="sub">Mr. Ravi's Personal Assistant</p>
+  <div class="avatar jessica">&#128198;</div>
+  <h2>Jessica</h2>
+  <p class="sub">Mr. Ravi Yadav's Personal Assistant</p>
 </div>
 <div class="card">
   <div class="label">Name</div>
-  <input type="text" id="name-input" placeholder="e.g. Sameer" style="margin-bottom:10px;">
+  <input type="text" id="j-name" placeholder="e.g. Sameer" style="margin-bottom:10px;">
   <div class="label" style="margin-top:4px;">Phone Number</div>
-  <input type="tel" id="phone-input" placeholder="+91 98290 55878">
+  <input type="tel" id="j-phone" placeholder="+91 98290 55878">
 </div>
 <div class="card">
   <div class="label">Call Type</div>
   <div class="toggle-row">
-    <div class="toggle-btn selected" id="btn-checkin" onclick="selectType('checkin')">&#128075; Check-in</div>
-    <div class="toggle-btn" id="btn-plan" onclick="selectType('plan')">&#128197; Plan Meet</div>
+    <div class="toggle-btn selected" id="j-btn-checkin" onclick="jSelectType('checkin')">&#128075; Check-in</div>
+    <div class="toggle-btn" id="j-btn-plan" onclick="jSelectType('plan')">&#128197; Plan Meet</div>
+    <div class="toggle-btn" id="j-btn-message" onclick="jSelectType('message')">&#128140; Message</div>
   </div>
 </div>
-<div class="card" id="plan-fields">
-  <div class="label">Meetup Details</div>
-  <input type="text" id="time-input" placeholder="Time e.g. tomorrow 6pm" style="margin-bottom:10px;">
-  <input type="text" id="place-input" placeholder="Place e.g. Cafe Coffee Day">
+<div class="card" id="j-plan-fields" style="display:none;">
+  <div class="label">Time</div>
+  <input type="text" id="j-time" placeholder="e.g. tomorrow 6pm" style="margin-bottom:10px;">
+  <div class="label" style="margin-top:4px;">Place</div>
+  <input type="text" id="j-place" placeholder="e.g. Cafe Coffee Day">
 </div>
-<button class="call-btn" id="call-btn" onclick="makeCall()">&#128222; Call Now</button>
-<div class="status" id="status"></div>
-<div style="display:flex;justify-content:space-between;align-items:center;margin-top:24px;margin-bottom:14px;">
-  <div style="font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:#666;">&#128222; Call History</div>
-  <button onclick="loadLogs()" style="background:#1a1a26;border:1px solid #1e1e2e;border-radius:8px;color:#a78bfa;font-size:12px;padding:6px 14px;cursor:pointer;">&#8635; Refresh</button>
+<div class="card" id="j-message-fields" style="display:none;">
+  <div class="label">Your Message</div>
+  <textarea id="j-message" placeholder="e.g. will not be able to attend the marriage"></textarea>
+</div>
+<div class="timer" id="j-timer">00:00</div>
+<button class="call-btn jessica-btn" id="j-call-btn" onclick="jessicaCall()">&#128222; Call Now</button>
+<div class="status" id="j-status"></div>
+<div class="logs-header">
+  <div class="logs-title">&#128222; Call History</div>
+  <button class="refresh-btn" onclick="loadLogs()">&#8635; Refresh</button>
 </div>
 <div id="logs-container"><div style="color:#555;font-size:13px;text-align:center;padding:16px;">No calls yet.</div></div>
+</div>
+
+<!-- BUNTY PANEL -->
+<div class="panel" id="panel-bunty">
+<div class="header">
+  <div class="avatar bunty">&#128293;</div>
+  <h2>Bunty</h2>
+  <p class="sub">Ravi ka Khaas Yaar</p>
+</div>
+<div class="card">
+  <div class="label">Naam</div>
+  <input type="text" id="b-name" placeholder="e.g. Sameer" style="margin-bottom:10px;">
+  <div class="label" style="margin-top:4px;">Number</div>
+  <input type="tel" id="b-phone" placeholder="+91 98290 55878">
+</div>
+<div class="card">
+  <div class="label">Call Type</div>
+  <div class="toggle-row">
+    <div class="toggle-btn bunty-selected" id="b-btn-checkin" onclick="bSelectType('checkin')">&#128075; Haal-chaal</div>
+    <div class="toggle-btn" id="b-btn-plan" onclick="bSelectType('plan')">&#128197; Milna</div>
+    <div class="toggle-btn" id="b-btn-message" onclick="bSelectType('message')">&#128140; Message</div>
+  </div>
+</div>
+<div class="card" id="b-plan-fields" style="display:none;">
+  <div class="label">Time</div>
+  <input type="text" id="b-time" placeholder="e.g. kal shaam 6 baje" style="margin-bottom:10px;">
+  <div class="label" style="margin-top:4px;">Jagah</div>
+  <input type="text" id="b-place" placeholder="e.g. Tapri, C-scheme">
+</div>
+<div class="card" id="b-message-fields" style="display:none;">
+  <div class="label">Message</div>
+  <textarea id="b-message" placeholder="e.g. shaadi mein nahi aa payega"></textarea>
+</div>
+<div class="timer" id="b-timer">00:00</div>
+<button class="call-btn bunty-btn" id="b-call-btn" onclick="buntyCall()">&#128222; Call Maar</button>
+<div class="status" id="b-status"></div>
+</div>
+
 <script>
-var callType = 'checkin';
-function selectType(t) {
-  callType = t;
-  document.getElementById('btn-checkin').classList.toggle('selected', t==='checkin');
-  document.getElementById('btn-plan').classList.toggle('selected', t==='plan');
-  document.getElementById('plan-fields').style.display = t==='plan' ? 'block' : 'none';
+var jCallType = 'checkin';
+var bCallType = 'checkin';
+var timerInterval = null;
+var timerSeconds = 0;
+
+function switchTab(tab) {
+  document.getElementById('tab-jessica').classList.toggle('active', tab==='jessica');
+  document.getElementById('tab-bunty').classList.toggle('active', tab==='bunty');
+  document.getElementById('panel-jessica').classList.toggle('active', tab==='jessica');
+  document.getElementById('panel-bunty').classList.toggle('active', tab==='bunty');
 }
-async function makeCall() {
-  var phone = document.getElementById('phone-input').value.trim();
-  if (!phone) { showStatus('Enter a phone number.', 'error'); return; }
-  if (!phone.startsWith('+')) phone = '+91' + phone.replace(/^0/, '');
-  if (callType === 'plan') {
-    var t = document.getElementById('time-input').value.trim();
-    var p = document.getElementById('place-input').value.trim();
-    if (!t || !p) { showStatus('Enter time and place.', 'error'); return; }
+
+function jSelectType(t) {
+  jCallType = t;
+  ['checkin','plan','message'].forEach(function(x){ document.getElementById('j-btn-'+x).classList.toggle('selected', t===x); });
+  document.getElementById('j-plan-fields').style.display = t==='plan' ? 'block' : 'none';
+  document.getElementById('j-message-fields').style.display = t==='message' ? 'block' : 'none';
+}
+
+function bSelectType(t) {
+  bCallType = t;
+  ['checkin','plan','message'].forEach(function(x){ document.getElementById('b-btn-'+x).classList.toggle('bunty-selected', t===x); });
+  document.getElementById('b-plan-fields').style.display = t==='plan' ? 'block' : 'none';
+  document.getElementById('b-message-fields').style.display = t==='message' ? 'block' : 'none';
+}
+
+function startTimer(prefix) {
+  timerSeconds = 0;
+  var el = document.getElementById(prefix+'-timer');
+  el.style.display = 'block';
+  timerInterval = setInterval(function() {
+    timerSeconds++;
+    var m = Math.floor(timerSeconds/60).toString().padStart(2,'0');
+    var s = (timerSeconds%60).toString().padStart(2,'0');
+    el.textContent = m+':'+s;
+  }, 1000);
+}
+
+function stopTimer(prefix) {
+  if (timerInterval) clearInterval(timerInterval);
+  document.getElementById(prefix+'-timer').style.display = 'none';
+}
+
+async function jessicaCall() {
+  var phone = document.getElementById('j-phone').value.trim();
+  var fname = document.getElementById('j-name').value.trim();
+  if (!fname) { showStatus('j-status', 'Enter a name.', 'error'); return; }
+  if (!phone) { showStatus('j-status', 'Enter a phone number.', 'error'); return; }
+  if (!phone.startsWith('+')) phone = '+91' + phone.replace(/^0/,'');
+  if (jCallType==='plan') {
+    if (!document.getElementById('j-time').value.trim() || !document.getElementById('j-place').value.trim()) {
+      showStatus('j-status', 'Enter time and place.', 'error'); return;
+    }
   }
-  var btn = document.getElementById('call-btn');
+  if (jCallType==='message' && !document.getElementById('j-message').value.trim()) {
+    showStatus('j-status', 'Enter a message.', 'error'); return;
+  }
+  var btn = document.getElementById('j-call-btn');
   btn.disabled = true; btn.textContent = 'Calling...';
-  var fname = document.getElementById('name-input').value.trim();
-  if (!fname) { showStatus('Please enter a name.', 'error'); btn.disabled=false; btn.textContent='\u260e Call Now'; return; }
-  var body = { to: phone, call_type: callType, friend_name: fname };
-  if (callType === 'plan') {
-    body.time  = document.getElementById('time-input').value.trim();
-    body.place = document.getElementById('place-input').value.trim();
-  }
+  var body = { to: phone, call_type: jCallType, friend_name: fname, bot: 'jessica' };
+  if (jCallType==='plan') { body.time=document.getElementById('j-time').value.trim(); body.place=document.getElementById('j-place').value.trim(); }
+  if (jCallType==='message') { body.message=document.getElementById('j-message').value.trim(); }
   try {
     var res = await fetch('/call/outbound', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
     var data = await res.json();
-    if (res.ok) { showStatus('Pooja is calling '+phone+'...', 'success'); }
-    else { showStatus(data.error || 'Call failed.', 'error'); }
-  } catch(e) { showStatus('Network error.', 'error'); }
-  btn.disabled = false; btn.textContent = '\u260e Call Now';
+    if (res.ok) { showStatus('j-status', 'Jessica is calling '+fname+'...', 'success'); startTimer('j'); btn.textContent = 'On Call...'; }
+    else { showStatus('j-status', data.error||'Call failed.', 'error'); btn.disabled=false; btn.textContent='\u260e Call Now'; }
+  } catch(e) { showStatus('j-status', 'Network error.', 'error'); btn.disabled=false; btn.textContent='\u260e Call Now'; }
 }
-function showStatus(msg, type) {
-  var el = document.getElementById('status');
+
+async function buntyCall() {
+  var phone = document.getElementById('b-phone').value.trim();
+  var fname = document.getElementById('b-name').value.trim();
+  if (!fname) { showStatus('b-status', 'Naam daalo.', 'error'); return; }
+  if (!phone) { showStatus('b-status', 'Number daalo.', 'error'); return; }
+  if (!phone.startsWith('+')) phone = '+91' + phone.replace(/^0/,'');
+  if (bCallType==='plan') {
+    if (!document.getElementById('b-time').value.trim() || !document.getElementById('b-place').value.trim()) {
+      showStatus('b-status', 'Time aur jagah daalo.', 'error'); return;
+    }
+  }
+  if (bCallType==='message' && !document.getElementById('b-message').value.trim()) {
+    showStatus('b-status', 'Message daalo.', 'error'); return;
+  }
+  var btn = document.getElementById('b-call-btn');
+  btn.disabled = true; btn.textContent = 'Call ho raha hai...';
+  var body = { to: phone, call_type: bCallType, friend_name: fname, bot: 'bunty' };
+  if (bCallType==='plan') { body.time=document.getElementById('b-time').value.trim(); body.place=document.getElementById('b-place').value.trim(); }
+  if (bCallType==='message') { body.message=document.getElementById('b-message').value.trim(); }
+  try {
+    var res = await fetch('/call/outbound', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+    var data = await res.json();
+    if (res.ok) { showStatus('b-status', 'Bunty call maar raha hai '+fname+' ko...', 'success'); startTimer('b'); btn.textContent = 'Call pe hai...'; }
+    else { showStatus('b-status', data.error||'Call fail ho gaya.', 'error'); btn.disabled=false; btn.textContent='\u260e Call Maar'; }
+  } catch(e) { showStatus('b-status', 'Network error.', 'error'); btn.disabled=false; btn.textContent='\u260e Call Maar'; }
+}
+
+function showStatus(id, msg, type) {
+  var el = document.getElementById(id);
   el.textContent = msg; el.className = 'status '+type; el.style.display = 'block';
   setTimeout(function(){ el.style.display='none'; }, 5000);
 }
+
 function loadLogs() {
-  fetch('/pooja/logs').then(function(r){ return r.json(); }).then(function(logs) {
+  fetch('/jessica/logs').then(function(r){ return r.json(); }).then(function(logs) {
     var c = document.getElementById('logs-container');
-    if (!logs || logs.length === 0) { c.innerHTML = '<div style="color:#555;font-size:13px;text-align:center;padding:16px;">No calls yet.</div>'; return; }
+    if (!logs||!logs.length) { c.innerHTML='<div style="color:#555;font-size:13px;text-align:center;padding:16px;">No calls yet.</div>'; return; }
     c.innerHTML = logs.map(function(log) {
-      var badge = log.call_type==='plan' ? '&#128197; Plan' : '&#128075; Check-in';
-      var details = log.call_type==='plan' ? '<div style="font-size:12px;color:#888;margin:4px 0;">'+log.place+' &bull; '+log.time_proposed+'</div>' : '';
-      var tr = log.transcript && log.transcript.length ? '<div class="transcript" id="tr-'+log.call_sid+'" style="display:none">'+log.transcript.map(function(l){ var parts=l.split(': '); return '<div class="tr-line"><span class="tr-role">'+parts[0]+':</span> '+parts.slice(1).join(': ')+'</div>'; }).join('')+'</div>' : '';
-      var audio = log.recording_url ? '<audio controls style="width:100%;margin-top:10px;border-radius:8px;" src="'+log.recording_url+'"></audio>' : '<div style="font-size:11px;color:#555;margin-top:6px;">Recording processing...</div>';
-      return '<div class="log-card"><div class="log-top"><div><div class="log-name">'+log.friend_name+'</div><div class="log-meta">'+badge+' &bull; '+log.timestamp+' &bull; '+log.duration+'s</div></div><div class="log-status '+( log.status==='completed' ? 'ok' : 'na')+'">'+log.status+'</div></div>'+details+'<button class="tr-toggle" onclick="toggleTr(\\''+log.call_sid+'\\')">&#128172; Transcript</button>'+tr+audio+'</div>';
+      var botLabel = log.bot==='bunty' ? '&#128293; Bunty' : '&#128198; Jessica';
+      var badge = log.call_type==='plan' ? '&#128197; Plan' : log.call_type==='message' ? '&#128140; Msg' : '&#128075; Check-in';
+      var details = log.call_type==='plan' ? '<div style="font-size:11px;color:#888;margin:4px 0;">'+log.place+' &bull; '+log.time_proposed+'</div>' : '';
+      var tr = log.transcript&&log.transcript.length ? '<div class="transcript" id="tr-'+log.call_sid+'" style="display:none">'+log.transcript.map(function(l){ var p=l.split(': '); return '<div class="tr-line"><span class="tr-role">'+p[0]+':</span> '+p.slice(1).join(': ')+'</div>'; }).join('')+'</div>' : '';
+      var audio = log.recording_url ? '<audio controls style="width:100%;margin-top:8px;border-radius:8px;" src="'+log.recording_url+'"></audio>' : '<div style="font-size:11px;color:#555;margin-top:5px;">Recording processing...</div>';
+      return '<div class="log-card"><div class="log-top"><div><div class="log-name">'+log.friend_name+' <span style="font-size:11px;color:#666;">'+botLabel+'</span></div><div class="log-meta">'+badge+' &bull; '+log.timestamp+' &bull; '+log.duration+'s</div></div><div class="log-status '+( log.status==='completed'?'ok':'na')+'">'+log.status+'</div></div>'+details+'<button class="tr-toggle" onclick="toggleTr(\\''+log.call_sid+'\\')">&#128172; Transcript</button>'+tr+audio+'</div>';
     }).join('');
   }).catch(function(){});
 }
@@ -407,7 +578,6 @@ loadLogs();
 </script>
 </body>
 </html>"""
-        html = html.replace('CONTACTS_PLACEHOLDER', contacts_json)
         return Response(html, mimetype='text/html')
 
     return Response('Not found', status=404)
@@ -499,18 +669,22 @@ def outbound_call():
     time        = data.get('time', '').strip()
     place       = data.get('place', '').strip()
     friend_name = data.get('friend_name', '').strip() or to
-
+    friend_name = data.get('friend_name', '').strip() or to
+    message     = data.get('message', '').strip()
+    bot         = data.get('bot', 'jessica')
     if not to:
         return {"error": "to is required"}, 400
     if call_type == 'plan' and (not time or not place):
         return {"error": "time and place required for plan call"}, 400
+    if call_type == 'message' and not message:
+        return {"error": "message is required for message delivery call"}, 400
 
     print(f"\n📤 Outbound [{call_type}] → {friend_name} ({to}) | Time: {time} | Place: {place}")
 
     try:
         twilio = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         base   = os.getenv('BASE_URL', 'https://callbot-production-a211.up.railway.app')
-        params = urllib.parse.urlencode({'call_type': call_type, 'time': time, 'place': place, 'friend_name': friend_name})
+        params = urllib.parse.urlencode({'call_type': call_type, 'time': time, 'place': place, 'friend_name': friend_name, 'message': message, 'bot': bot})
         call   = twilio.calls.create(
             to=to,
             from_=TWILIO_PHONE_NUMBER,
@@ -535,22 +709,34 @@ def outbound_start():
     time         = request.args.get('time', 'soon')
     place        = request.args.get('place', 'the usual spot')
     friend_name  = request.args.get('friend_name', 'Friend')
-
+    friend_name  = request.args.get('friend_name', 'Friend')
+    message      = request.args.get('message', '')
+    bot          = request.args.get('bot', 'jessica')
     print(f"\n🤝 Picked up | SID: {call_sid} | {friend_name} | Type: {call_type}")
 
     with call_lock:
         call_history[call_sid] = []
-        call_meta[call_sid]    = {'type': call_type, 'time': time, 'place': place, 'friend_name': friend_name, 'language': 'english'}
+        call_meta[call_sid]    = {'type': call_type, 'time': time, 'place': place, 'friend_name': friend_name, 'message': message, 'bot': bot, 'language': 'english'}
 
-    if call_type == 'plan':
-        name_part = f"Hello, is this {friend_name}? " if friend_name and not friend_name.startswith('+') and not friend_name.isdigit() else "Hello! "
-        opening = name_part + f"This is Pooja calling on behalf of Mr. Ravi. I was wondering if you are available to meet him at {place} around {time}?"
+    if bot == 'bunty':
+        if call_type == 'plan':
+            opening = f"Oye {friend_name} bhai, Bunty bol raha hoon. Abe sun, Ravi pooch raha tha ki {time} ko {place} pe milna ho sakta hai kya?"
+        elif call_type == 'message':
+            opening = f"Oye {friend_name} bhai, Bunty bol raha hoon, Ravi ki taraf se ek baat pohnchaani thi."
+        else:
+            opening = f"Oye {friend_name} bhai, Bunty bol raha hoon. Ravi ne bola tha tera haal-chaal poochhun. Kya scene hai tera?"
     else:
         name_part = f"Hello, is this {friend_name}? " if friend_name and not friend_name.startswith('+') and not friend_name.isdigit() else "Hello! "
-        opening = name_part + "This is Pooja calling on behalf of Mr. Ravi. He wanted me to check in on you and see how you have been doing."
-
+        if call_type == 'plan':
+            opening = name_part + f"This is Jessica, personal assistant to Mr. Ravi Yadav. I was wondering if you are available to meet him at {place} around {time}?"
+        elif call_type == 'message':
+            opening = name_part + "This is Jessica, personal assistant to Mr. Ravi Yadav. I am calling to pass on a message from him."
+        else:
+            opening = name_part + "This is Jessica, personal assistant to Mr. Ravi Yadav. He wanted me to check in on you and see how you have been doing."
     response = VoiceResponse()
-    play_audio_or_say(response, opening, voice_id=POOJA_VOICE_ID, fallback_lang='en-US')
+    voice_id = HINDI_VOICE_ID if bot == 'bunty' else JESSICA_VOICE_ID
+    fallback = 'hi-IN' if bot == 'bunty' else 'en-US'
+    play_audio_or_say(response, opening, voice_id=voice_id, fallback_lang=fallback)
 
     with call_lock:
         call_history[call_sid].append({"role": "assistant", "content": opening})
@@ -588,8 +774,11 @@ def outbound_respond():
     clean_reply = reply.replace('[END_CALL]', '').strip()
 
 
-    # Pooja always replies in English, friend always speaks Hindi
-    play_audio_or_say(response, clean_reply, voice_id=POOJA_VOICE_ID, fallback_lang='en-US')
+    with call_lock:
+        resp_bot = call_meta.get(call_sid, {}).get('bot', 'jessica')
+    resp_voice    = HINDI_VOICE_ID if resp_bot == 'bunty' else JESSICA_VOICE_ID
+    resp_fallback = 'hi-IN' if resp_bot == 'bunty' else 'en-US'
+    play_audio_or_say(response, clean_reply, voice_id=resp_voice, fallback_lang=resp_fallback)
     if end_call:
         print(f"  \u2705 Pooja hanging up")
         response.hangup()
@@ -670,7 +859,7 @@ def call_status():
         # Build transcript
         transcript = []
         for msg in history:
-            role    = 'Pooja' if msg['role'] == 'assistant' else 'Friend'
+            role    = 'Jessica' if msg['role'] == 'assistant' else 'Friend'
             transcript.append(f"{role}: {msg['content']}")
 
         # Fetch recording URL from Twilio (may take a few seconds to be available)
@@ -687,6 +876,7 @@ def call_status():
         log_entry = {
             'call_sid':      call_sid,
             'friend_name':   meta.get('friend_name', 'Unknown'),
+            'bot':           meta.get('bot', 'jessica'),
             'call_type':     meta.get('type', 'checkin'),
             'time_proposed': meta.get('time', ''),
             'place':         meta.get('place', ''),
@@ -711,12 +901,54 @@ def call_status():
 # ============================================================
 # LOGS API — for UI polling
 # ============================================================
-@app.route('/pooja/logs', methods=['GET'])
+@app.route('/jessica/logs', methods=['GET'])
 def get_logs():
     with call_lock:
         logs = list(call_logs)
     return json.dumps(logs), 200, {'Content-Type': 'application/json'}
 
+
+
+# ============================================================
+# HINDI MALE ABUSIVE OUTBOUND BOT — BUNTY
+# ============================================================
+def get_bunty_prompt(call_type, time='', place='', message=''):
+    if call_type == 'plan':
+        return f"""Tu Bunty hai, Ravi ka khaas banda. Tu outbound call kar raha hai apne yaar ko milne ka plan fix karne ke liye.
+GOAL: Confirm kar ki yaar {place} pe {time} ko Ravi se milne ke liye free hai.
+RULES:
+- Haryanvi/Hindi mein baat kar — bilkul natural, jaise real dost hote hain
+- Short rakho — 1-3 sentences
+- Gaaliyan aur slangs zaroor use kar: bhai, yaar, abe, saale, bc, oye, chal
+- Warm aur friendly raho lekin abusive bhi — jaise close dost hote hain
+- Agar yaar agree kare → confirm karo aur wrap up karo
+- Agar alag time/place bole → acknowledge karo, confirm karo
+- Plan confirm hone pe exactly likho: [END_CALL]
+Opening: "Oye {'{friend_name}'} bhai, Ravi ka yaar Bunty bol raha hoon. Abe sun, Ravi pooch raha tha ki {time} ko {place} pe milna ho sakta hai kya?"
+"""
+    elif call_type == 'message':
+        return f"""Tu Bunty hai, Ravi ka khaas banda. Tu ek message deliver karne ke liye call kar raha hai.
+MESSAGE: {message}
+RULES:
+- Haryanvi/Hindi mein baat kar
+- Message ko naturally aur warmly deliver kar — elaborate karo thoda
+- Phir poochho: "Koi message hai Ravi ke liye?"
+- Unka reply acknowledge karo aur wrap up karo
+- End pe exactly likho: [END_CALL]
+Opening: "Oye {'{friend_name}'} bhai, Bunty bol raha hoon, Ravi ki taraf se call hai."
+"""
+    else:  # checkin
+        return """Tu Bunty hai, Ravi ka khaas banda. Tu check-in call kar raha hai.
+GOAL: Casually poochho kaisa hai, kya chal raha hai.
+RULES:
+- Haryanvi/Hindi mein baat kar — bilkul natural
+- Short rakho — 1-3 sentences
+- Gaaliyan aur slangs use kar warmly
+- Genuinely interested raho
+- 3-4 exchanges ke baad naturally wrap up karo
+- End pe exactly likho: [END_CALL]
+Opening: "Oye bhai, Bunty bol raha hoon. Ravi ne bola tha tera haal-chaal poochhun. Kya scene hai tera?"
+"""
 
 # ============================================================
 # RECORDING PROXY
@@ -748,7 +980,7 @@ if __name__ == '__main__':
     print("\U0001f680 Sarcastic Call Bot + Pooja Starting...")
     print("=" * 60)
     print(f"\U0001f4de Incoming calls:    POST /call/incoming")
-    print(f"\U0001f4e4 Pooja UI:          GET  /pooja")
+    print(f"\U0001f4e4 Pooja UI:          GET  /jessica")
     print(f"\U0001f4e4 Pooja outbound:    POST /call/outbound")
     print(f"\U0001f50a Audio serve:       GET  /audio/<filename>")
     print(f"\U0001f511 UI Password:       {UI_PASSWORD}")
