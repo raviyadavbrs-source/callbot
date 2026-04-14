@@ -4,6 +4,5 @@ twilio
 anthropic
 requests
 websocket-client
-gevent
-gevent-websocket
+eventlet
 gunicorn
