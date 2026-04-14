@@ -269,20 +269,25 @@ def text_to_speech(text, voice_id=None, language='english'):
     if not ELEVENLABS_API_KEY:
         return None
     try:
+        # Use streaming endpoint for lower latency
         resp = requests.post(
-            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream",
             json={
                 "text": text,
                 "model_id": "eleven_flash_v2_5",
                 "voice_settings": {"stability": 0.5, "similarity_boost": 0.75,
-                                   "style": 0.5, "use_speaker_boost": True}
+                                   "style": 0.0, "use_speaker_boost": False}
             },
             headers={"Accept": "audio/mpeg", "Content-Type": "application/json",
-                     "xi-api-key": ELEVENLABS_API_KEY}
+                     "xi-api-key": ELEVENLABS_API_KEY},
+            stream=True,
+            timeout=10
         )
         if resp.status_code == 200:
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
-            tmp.write(resp.content)
+            for chunk in resp.iter_content(chunk_size=4096):
+                if chunk:
+                    tmp.write(chunk)
             tmp.close()
             return tmp.name
     except Exception as e:
