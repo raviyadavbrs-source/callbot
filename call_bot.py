@@ -295,14 +295,13 @@ def text_to_speech(text, voice_id=None, language='english'):
     return None
 
 def play_audio_or_say(response, text, voice_id=None, language='english', fallback_lang='en-US'):
-    audio_file = text_to_speech(text, voice_id=voice_id, language=language)
-    if audio_file:
-        filename = os.path.basename(audio_file)
-        base_url = os.getenv('BASE_URL', 'https://callbot-production-a211.up.railway.app')
-        response.play(f"{base_url}/audio/{filename}")
-        threading.Timer(60, os.unlink, args=[audio_file]).start()
+    # Use Twilio Polly voices — instant, no file generation
+    if language == 'hindi' or fallback_lang == 'hi-IN':
+        # Hindi — Polly Aditi (Indian Hindi female)
+        response.say(text, voice='Polly.Aditi', language='hi-IN')
     else:
-        response.say(text, voice='alice', language=fallback_lang)
+        # English — Polly Joanna (American female, clear and natural)
+        response.say(text, voice='Polly.Joanna-Neural', language='en-US')
 
 # ============================================================
 # SERVE AUDIO
