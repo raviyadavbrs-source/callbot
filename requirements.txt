@@ -1,0 +1,7 @@
+flask 
+flask-sock 
+twilio 
+anthropic 
+requests 
+deepgram-sdk 
+audioop-lts 
